@@ -1,0 +1,19 @@
+# Phase 1+ — core engine pipeline configuration (DeepStream / GStreamer).
+# Placeholder structure; extend when integrating models and streams.
+
+version: 1
+
+# Video source: rtsp://..., file://..., or device index as supported by the pipeline.
+sources:
+  - uri: "rtsp://127.0.0.1:8554/stream"
+    enabled: false
+
+# Reserved for detector / tracker / ReID engine paths (TensorRT, ONNX, etc.).
+models:
+  detector: ""
+  tracker: ""
+
+# Output: stdout, file path, or messaging (Phase 2+).
+output:
+  mode: stdout
+  # file: /tmp/edge_retail_events.jsonl
