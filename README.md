@@ -92,16 +92,30 @@ make -j$(nproc)
 ### 3. Run
 
 ```bash
-# Terminal 1 — inference pipeline
+# Terminal 1 — inference pipeline (headless ZMQ mode)
 cd core_engine
 ./build/edge_retail_core_engine --config configs/default.yaml --verbose
 
 # Terminal 2 — ZMQ consumer
 cd messaging/zmq
 python3 consumer.py --endpoint tcp://localhost:5555 --filter person
+
+# Terminal 2 (alt) — cross-camera ReID matcher
+python3 reid_matcher.py --endpoint tcp://localhost:5555 --threshold 0.85
 ```
 
 On first run, nvinfer auto-builds TRT engines from the ONNX files (~5 min each on Orin NX). Subsequent starts load the cached `.engine` files instantly.
+
+**Annotated video output** — set `output.osd_file` in `default.yaml` to record an MKV file with bounding boxes and tracking IDs drawn on a tiled view of all camera streams:
+
+```bash
+# In default.yaml: output.osd_file: "/tmp/reid_annotated.mkv"
+./build/edge_retail_core_engine --config configs/default.yaml --verbose
+# Ctrl+C to stop, then:
+ffplay /tmp/reid_annotated.mkv
+```
+
+The output is a side-by-side tiled view (one column per source, each tile at 960×540 / 16:9). Note: VLC 3.0.x on Jetson ARM64 crashes on playback due to a GPU acceleration bug — use `ffplay` instead.
 
 ---
 
@@ -145,6 +159,8 @@ One JSON object per frame, written to the configured output (ZMQ / stdout / file
 sources:
   - uri: "rtsp://<host>:<port>/<path>"
     enabled: true
+  - uri: "rtsp://<host>:<port>/<path2>"   # second camera for cross-camera ReID
+    enabled: true
 
 models:
   detector: "configs/config_infer_primary_peoplenet.txt"
@@ -154,7 +170,10 @@ models:
 output:
   mode: zmq                    # zmq | stdout | file
   endpoint: "tcp://*:5555"
+  osd_file: "/tmp/reid_annotated.mkv"  # remove this line to disable OSD recording
 ```
+
+`osd_file` enables an annotated video recording branch: `nvmultistreamtiler → nvdsosd → nvvideoconvert → nvv4l2h264enc → h264parse → matroskamux → filesink`. Removing the key reverts to `fakesink` (headless). MKV is used instead of MP4 because `matroskamux` writes its index progressively and survives Ctrl+C; `qtmux`/`mp4mux` write the moov atom only at EOS and produce unplayable files if the pipeline is interrupted.
 
 ### `configs/config_infer_secondary_reid.txt` (key fields)
 
@@ -443,13 +462,32 @@ nvidia-smi   # or:  /usr/local/cuda/bin/nvcc --version
 
 ---
 
-### 9. NvDCF Tracker — Visual Features and NVMM Surface Pinning
+### 9. NvDCF Tracker — Tuning and Known Issues
 
-The NvDCF tracker in DeepStream supports a **visual tracking mode** that computes appearance features from frame crops. Enabling this (`visualTrackerType=1`) causes the tracker to pin NVMM surfaces for CPU access, which can race with the display (nvdsosd) or downstream elements if buffers are not properly unmapped.
+**Visual features and NVMM surface pinning**
 
-**Symptom**: pipeline crashes or hangs with NVMM pinning errors in the log.
+NvDCF's visual tracking mode (`visualTrackerType=1`) pins NVMM surfaces for CPU access. This races with `nvdsosd` and any downstream element that also maps the buffer, causing pipeline crashes or hangs on Jetson.
 
-**Fix**: set `useColorNames=0` and `useHog=0` in `config_tracker_NvDCF.yml` to disable visual features and revert to pure correlation-filter tracking (IoU + motion). Cross-camera ReID handles appearance matching instead.
+Fix: set `visualTrackerType=0` (DUMMY mode) in `config_tracker_NvDCF.yml`. The tracker falls back to pure IoU + Kalman filter motion — no pixel access, no NVMM contention. Cross-camera ReID handles appearance matching separately.
+
+**Class filtering — `filter-out-class-ids` in the PGIE config**
+
+PeopleNet detects three classes: person (0), bag (1), face (2). NvDCF assigns tracking IDs from a single global counter across all classes. Without filtering, face and bag bboxes appear in the OSD with IDs in the same sequence as persons, making the video confusing.
+
+Fix: add `filter-out-class-ids=1;2` to `config_infer_primary_peoplenet.txt`. This removes bag and face from `NvDsMeta` before it reaches the tracker — they are never tracked, never drawn by OSD, and never processed by the pad probe. Only person detections reach downstream elements.
+
+**ID instability — motion model tuning**
+
+With visual features disabled, the tracker relies entirely on a Kalman filter for motion prediction. The default `processNoiseVar4Vel=0.03` is tuned for slow, smooth motion. When a person changes direction quickly, the Kalman prediction diverges, the IoU overlap drops below `minMatchingScore4Iou`, and the track is dropped — creating a new ID on re-detection.
+
+Key parameters to tune in `config_tracker_NvDCF.yml`:
+
+| Parameter | Default | Tuned | Effect |
+|---|---|---|---|
+| `maxShadowTrackingAge` | 51 | 90 | Keeps lost tracks alive for ~3s before eviction |
+| `processNoiseVar4Vel` | 0.03 | 0.15 | Allows Kalman to handle faster direction changes |
+
+Without a visual ReID appearance model in the tracker itself (which requires re-enabling `visualTrackerType=1`), ID instability on occlusion and re-entry remains a fundamental limitation of pure IoU tracking. The production fix is to integrate OSNet embeddings directly into the NvDCF association cost matrix via the `matchingScoreWeight4VisualSimilarity` weight — but that requires enabling visual tracking features (and resolving the NVMM surface pinning issue separately, e.g. by using `nvbuffermap` with proper unpin).
 
 ---
 
@@ -501,9 +539,20 @@ torchreid.utils.load_pretrained_weights(model, 'osnet_x1_0_market_256x128_amsgra
 | **Zone-aware filtering** | Suppress matches between cameras that have no plausible physical path (e.g., camera A is entrance, camera B is stockroom — the set of reachable pairs is constrained by store layout) |
 | **Track-level gallery** | Replace per-frame embedding updates with a per-tracklet representative (mean of top-confidence frames); reduces gallery noise |
 
-### Pipeline — OSD and Video Output
+### Pipeline — OSD Improvements
 
-Adding `nvdsosd` enables visual debugging of detection boxes, tracking IDs, and (with custom overlays) ReID match events directly on the video stream. See the OSD integration notes in the pipeline source (`pipeline.cpp`) for the NVMM surface handling required to avoid pinning races.
+The current OSD branch draws standard DeepStream bboxes and tracking IDs. Possible extensions:
+- **ReID match overlay**: when `reid_matcher.py` fires a `reid_match` event, feed it back to the C++ pipeline (e.g. via a ZMQ reverse channel) to draw a coloured border or label linking matched persons across cameras
+- **Confidence display**: show ReID similarity score alongside the tracking ID to make match quality visible during debugging
+- **Per-class colour coding**: colour bboxes by class (green=person, yellow=bag) via `NvDsObjectMeta.rect_params.border_color`
+
+### Tracker — Re-enable Visual ReID for Stable IDs
+
+With `visualTrackerType=0`, ID stability degrades when persons are briefly occluded or change direction. The correct production upgrade is to re-enable NvDCF visual tracking with the OSNet embedding as the appearance descriptor, letting the tracker itself use appearance similarity during association:
+
+1. Set `visualTrackerType=1` and `matchingScoreWeight4VisualSimilarity > 0` in `config_tracker_NvDCF.yml`
+2. Resolve the NVMM surface pinning race by ensuring `nvdsosd` maps buffers after the tracker releases them (use `process-mode=0` CPU rendering, which was already set)
+3. Tune `minMatchingScore4VisualSimilarity` on real footage — with an ImageNet backbone, this threshold needs to be lower than with a metric-loss model
 
 ---
 

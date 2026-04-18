@@ -21,6 +21,9 @@ network-mode=2
 
 batch-size=1
 num-detected-classes=3
+# Only track persons (class 0). Bag (1) and face (2) are filtered out before
+# they reach the tracker, so they never get tracking IDs or OSD bboxes.
+filter-out-class-ids=1;2
 interval=0
 
 # nvinfer identity used when multiple GIEs are chained

@@ -191,15 +191,22 @@ gboolean Pipeline::on_bus_message(GstBus* /*bus*/, GstMessage* msg, gpointer dat
 //   nvurisrcbin(s) --[pad-added]--> nvstreammux
 //
 // Without ReID (reid_config empty):
-//   nvstreammux → nvinfer(PeopleNet) → nvtracker → fakesink
+//   nvstreammux → nvinfer(PeopleNet) → nvtracker → [osd chain] → sink
 //
 // With ReID (reid_config set):
-//   nvstreammux → nvinfer(PeopleNet) → nvinfer(ReID/SGIE) → nvtracker → fakesink
+//   nvstreammux → nvinfer(PeopleNet) → nvinfer(ReID/SGIE) → nvtracker → [osd chain] → sink
 //                                                                ^
 //                                                          pad_probe: extracts
 //                                                          detections + embeddings
 //
-// nvdsosd is absent: it pins NVMM surfaces (NvDecGetSurfPinHandle races on Jetson).
+// OSD chain (when output.osd_file is set):
+//   nvmultistreamtiler → nvdsosd → nvvideoconvert → nvv4l2h264enc → h264parse → matroskamux → filesink
+//   Tiler composites all source surfaces into one frame (1 row × N columns) so
+//   nvdsosd draws boxes in the correct spatial region per source.
+//   Safe because NvDCF visual features are disabled (useColorNames=0, useHog=0),
+//   so the tracker does not pin NVMM surfaces concurrently with nvdsosd.
+//
+// Without OSD: fakesink (headless, for ZMQ/stdout-only operation).
 // ---------------------------------------------------------------------------
 
 bool Pipeline::build() {
@@ -210,10 +217,52 @@ bool Pipeline::build() {
   streammux_ = gst_element_factory_make("nvstreammux", "muxer");
   pgie_      = gst_element_factory_make("nvinfer",     "pgie");
   tracker_   = gst_element_factory_make("nvtracker",   "tracker");
-  sink_      = gst_element_factory_make("fakesink",    "sink");
 
-  if (!pipeline_ || !streammux_ || !pgie_ || !tracker_ || !sink_) {
-    std::cerr << "[pipeline] Failed to create one or more GStreamer elements\n";
+  // Count enabled sources (needed for tiler columns and streammux batch-size)
+  guint num_sources = 0;
+  for (const auto& s : cfg_.sources)
+    if (s.enabled) ++num_sources;
+
+  const bool osd_enabled = !cfg_.output.osd_file.empty();
+  if (osd_enabled) {
+    tiler_     = gst_element_factory_make("nvmultistreamtiler", "tiler");
+    osd_       = gst_element_factory_make("nvdsosd",            "osd");
+    videoconv_ = gst_element_factory_make("nvvideoconvert",     "videoconv");
+    encoder_   = gst_element_factory_make("nvv4l2h264enc",      "encoder");
+    h264parse_ = gst_element_factory_make("h264parse",          "h264parse");
+    muxer_     = gst_element_factory_make("matroskamux",        "muxer_mkv");
+    sink_      = gst_element_factory_make("filesink",           "sink");
+    if (!tiler_ || !osd_ || !videoconv_ || !encoder_ || !h264parse_ || !muxer_ || !sink_) {
+      std::cerr << "[pipeline] Failed to create OSD chain elements\n";
+      return false;
+    }
+    // Tile all sources side-by-side: 1 row × N columns.
+    // Each tile is 960×540 (16:9), total output = (960*N) × 540.
+    const guint tile_w = 960;
+    const guint tile_h = 540;
+    g_object_set(tiler_,
+      "rows",    (guint)1,
+      "columns", (guint)num_sources,
+      "width",   (guint)(tile_w * num_sources),
+      "height",  (guint)tile_h,
+      nullptr);
+    // process-mode=0: CPU rendering — avoids GPU/NVMM surface contention on Jetson
+    g_object_set(osd_, "process-mode", (gint)0, nullptr);
+    g_object_set(encoder_, "bitrate", (guint)4000000, nullptr);
+    g_object_set(sink_, "location", cfg_.output.osd_file.c_str(),
+                        "sync",     (gboolean)FALSE, nullptr);
+    std::cerr << "[pipeline] OSD recording → " << cfg_.output.osd_file << "\n";
+  } else {
+    sink_ = gst_element_factory_make("fakesink", "sink");
+    if (!sink_) {
+      std::cerr << "[pipeline] Failed to create fakesink\n";
+      return false;
+    }
+    g_object_set(sink_, "sync", (gboolean)FALSE, nullptr);
+  }
+
+  if (!pipeline_ || !streammux_ || !pgie_ || !tracker_) {
+    std::cerr << "[pipeline] Failed to create core GStreamer elements\n";
     return false;
   }
 
@@ -227,11 +276,6 @@ bool Pipeline::build() {
     g_object_set(sgie_, "config-file-path", cfg_.models.reid_config.c_str(), nullptr);
     std::cerr << "[pipeline] ReID SGIE enabled: " << cfg_.models.reid_config << "\n";
   }
-
-  // Count enabled sources for batch-size
-  guint num_sources = 0;
-  for (const auto& s : cfg_.sources)
-    if (s.enabled) ++num_sources;
 
   g_object_set(streammux_,
     "batch-size",           num_sources,
@@ -252,22 +296,55 @@ bool Pipeline::build() {
     "gpu-id",         (guint)0,
     nullptr);
 
-  g_object_set(sink_, "sync", (gboolean)FALSE, nullptr);
+  // Add all elements and link the main chain
+  if (osd_enabled) {
+    // nvvideoconvert must output NV12 NVMM for nvv4l2h264enc
+    GstCaps* nv12_caps = gst_caps_from_string(
+        "video/x-raw(memory:NVMM), format=NV12");
 
-  // Add static elements and link the main chain
-  if (sgie_) {
-    gst_bin_add_many(GST_BIN(pipeline_),
-                     streammux_, pgie_, sgie_, tracker_, sink_, nullptr);
-    if (!gst_element_link_many(streammux_, pgie_, sgie_, tracker_, sink_, nullptr)) {
-      std::cerr << "[pipeline] Failed to link main chain (with SGIE)\n";
-      return false;
+    if (sgie_) {
+      gst_bin_add_many(GST_BIN(pipeline_),
+                       streammux_, pgie_, sgie_, tracker_,
+                       tiler_, osd_, videoconv_, encoder_, h264parse_, muxer_, sink_, nullptr);
+      bool ok = gst_element_link_many(streammux_, pgie_, sgie_, tracker_, tiler_, osd_, nullptr)
+             && gst_element_link(osd_, videoconv_)
+             && gst_element_link_filtered(videoconv_, encoder_, nv12_caps)
+             && gst_element_link_many(encoder_, h264parse_, muxer_, sink_, nullptr);
+      if (!ok) {
+        std::cerr << "[pipeline] Failed to link main chain (SGIE + OSD)\n";
+        gst_caps_unref(nv12_caps);
+        return false;
+      }
+    } else {
+      gst_bin_add_many(GST_BIN(pipeline_),
+                       streammux_, pgie_, tracker_,
+                       tiler_, osd_, videoconv_, encoder_, h264parse_, muxer_, sink_, nullptr);
+      bool ok = gst_element_link_many(streammux_, pgie_, tracker_, tiler_, osd_, nullptr)
+             && gst_element_link(osd_, videoconv_)
+             && gst_element_link_filtered(videoconv_, encoder_, nv12_caps)
+             && gst_element_link_many(encoder_, h264parse_, muxer_, sink_, nullptr);
+      if (!ok) {
+        std::cerr << "[pipeline] Failed to link main chain (OSD)\n";
+        gst_caps_unref(nv12_caps);
+        return false;
+      }
     }
+    gst_caps_unref(nv12_caps);
   } else {
-    gst_bin_add_many(GST_BIN(pipeline_),
-                     streammux_, pgie_, tracker_, sink_, nullptr);
-    if (!gst_element_link_many(streammux_, pgie_, tracker_, sink_, nullptr)) {
-      std::cerr << "[pipeline] Failed to link main chain\n";
-      return false;
+    if (sgie_) {
+      gst_bin_add_many(GST_BIN(pipeline_),
+                       streammux_, pgie_, sgie_, tracker_, sink_, nullptr);
+      if (!gst_element_link_many(streammux_, pgie_, sgie_, tracker_, sink_, nullptr)) {
+        std::cerr << "[pipeline] Failed to link main chain (SGIE)\n";
+        return false;
+      }
+    } else {
+      gst_bin_add_many(GST_BIN(pipeline_),
+                       streammux_, pgie_, tracker_, sink_, nullptr);
+      if (!gst_element_link_many(streammux_, pgie_, tracker_, sink_, nullptr)) {
+        std::cerr << "[pipeline] Failed to link main chain\n";
+        return false;
+      }
     }
   }
 
