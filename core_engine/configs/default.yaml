@@ -1,10 +1,10 @@
 version: 1
 
 sources:
-  - uri: "rtsp://192.168.9.146:18554/stream3"
+  - uri: "rtsp://192.168.9.146:18554/stream1"
     enabled: true
-  - uri: "rtsp://192.168.9.146:18554/stream4"   # second camera for cross-cam ReID
-    enabled: false                                # enable when second stream is available
+  - uri: "rtsp://192.168.9.146:18554/stream2"   # second camera for cross-cam ReID
+    enabled: true                                # enable when second stream is available
 
 models:
   detector: "configs/config_infer_primary_peoplenet.txt"
@@ -17,3 +17,4 @@ output:
   # mode: stdout               # uncomment for local debugging
   # mode: file
   # file: /tmp/edge_retail_events.jsonl
+  osd_file: "/tmp/reid_annotated.mkv"   # remove line to disable OSD recording

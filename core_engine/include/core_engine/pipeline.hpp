@@ -43,7 +43,14 @@ class Pipeline {
   GstElement* pgie_{nullptr};    // nvinfer primary — PeopleNet detection
   GstElement* sgie_{nullptr};    // nvinfer secondary — ReID embeddings (optional)
   GstElement* tracker_{nullptr}; // nvtracker — NvDCF
-  GstElement* sink_{nullptr};    // fakesink (headless)
+  GstElement* sink_{nullptr};    // fakesink (headless) OR filesink (osd mode)
+  // OSD chain — all null when osd_file is not set
+  GstElement* tiler_{nullptr};       // nvmultistreamtiler (N surfaces → 1 tiled frame)
+  GstElement* osd_{nullptr};         // nvdsosd
+  GstElement* videoconv_{nullptr};   // nvvideoconvert (RGBA NVMM → NV12 NVMM)
+  GstElement* encoder_{nullptr};     // nvv4l2h264enc (Jetson HW encoder)
+  GstElement* h264parse_{nullptr};   // h264parse (matroskamux needs parsed stream)
+  GstElement* muxer_{nullptr};       // matroskamux (MKV container)
 
   GMainLoop* loop_{nullptr};
 

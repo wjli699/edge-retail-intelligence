@@ -19,7 +19,7 @@ TargetManagement:
   minIouDiff4NewTarget: 0.7418
   minTrackerConfidence: 0.40
   probationAge: 2                # Frames before a tentative track becomes confirmed
-  maxShadowTrackingAge: 51       # Frames to keep an occluded/lost target alive
+  maxShadowTrackingAge: 90       # Frames to keep an occluded/lost target alive (~3s @30fps)
   earlyTerminationAge: 1
 
 TrajectoryManagement:
@@ -47,7 +47,7 @@ StateEstimator:
 
   processNoiseVar4Loc: 1.5110
   processNoiseVar4Size: 1.3159
-  processNoiseVar4Vel: 0.0300
+  processNoiseVar4Vel: 0.1500    # Raised from 0.03: allows Kalman to handle direction changes
   measurementNoiseVar4Detector: 3.0283
   measurementNoiseVar4Tracker: 8.1505
 

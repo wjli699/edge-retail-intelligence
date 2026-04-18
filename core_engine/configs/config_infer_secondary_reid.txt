@@ -9,12 +9,12 @@ process-mode=2
 operate-on-gie-id=1
 operate-on-class-ids=0
 
-# ReID model — NVIDIA TAO ReIdentificationNet (ResNet-50, Market-1501)
-# Download: scripts/download_reid.sh
+# ReID model — OSNet-x1.0 (Market-1501, 512-dim embeddings)
+# Export: scripts/export_reid_onnx.py
 # Input:  3 × 256 × 128  (C × H × W, RGB)
 # Output: 512-dim L2-normalised embedding vector
-onnx-file=../../models/reid/resnet50_market1501.onnx
-model-engine-file=../../models/reid/resnet50_market1501.onnx_b8_gpu0_fp16.engine
+onnx-file=../../models/reid/osnet_x1_0_market1501.onnx
+model-engine-file=../../models/reid/osnet_x1_0_market1501.onnx_b8_gpu0_fp16.engine
 
 net-scale-factor=0.0039215697906911373
 model-color-format=0

@@ -61,7 +61,12 @@ class EmbeddingGallery:
         self._entries: dict = {}
 
     def update(self, source_id: int, tid: int, emb: np.ndarray) -> None:
-        self._entries[(source_id, tid)] = {"emb": emb, "ts": time.monotonic()}
+        # Store unit-norm vector so query() is a plain dot-product.
+        norm = np.linalg.norm(emb)
+        self._entries[(source_id, tid)] = {
+            "emb": emb / (norm + 1e-8),
+            "ts": time.monotonic(),
+        }
         self._evict()
 
     def _evict(self) -> None:
@@ -77,14 +82,13 @@ class EmbeddingGallery:
         Return matches on other cameras above `threshold`, sorted by similarity.
         Each match: {"source_id": int, "tid": int, "similarity": float}
         """
+        # gallery stores unit-norm vectors; normalise query once here.
         q = emb / (np.linalg.norm(emb) + 1e-8)
         matches = []
         for (s, t), entry in self._entries.items():
             if s == source_id:
                 continue  # skip same camera
-            g = entry["emb"]
-            g = g / (np.linalg.norm(g) + 1e-8)
-            sim = float(np.dot(q, g))
+            sim = float(np.dot(q, entry["emb"]))
             if sim >= threshold:
                 matches.append({"source_id": s, "tid": t, "similarity": round(sim, 4)})
         return sorted(matches, key=lambda x: -x["similarity"])

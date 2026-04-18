@@ -20,6 +20,7 @@ struct OutputConfig {
   std::string mode{"zmq"};              // "stdout" | "file" | "zmq"
   std::string file_path;
   std::string endpoint{"tcp://*:5555"}; // ZMQ bind address (mode=zmq)
+  std::string osd_file;                 // if set, enables nvdsosd + H264 file recording
 };
 
 struct AppConfig {
