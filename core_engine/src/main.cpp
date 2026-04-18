@@ -1,10 +1,17 @@
 #include "core_engine/app.hpp"
 
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
 namespace {
+
+edge::retail::core::App* g_app = nullptr;
+
+void signal_handler(int) {
+  if (g_app) g_app->stop();
+}
 
 void print_usage(const char* exe) {
   std::cerr << "Usage: " << exe << " [--config <path>] [--verbose]\n";
@@ -36,5 +43,8 @@ int main(int argc, char* argv[]) {
   }
 
   edge::retail::core::App app(std::move(cfg));
+  g_app = &app;
+  std::signal(SIGINT, signal_handler);
+  std::signal(SIGTERM, signal_handler);
   return app.run();
 }

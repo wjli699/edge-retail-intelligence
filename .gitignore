@@ -1,0 +1,16 @@
+# Build artifacts
+core_engine/build/
+
+# Model binaries (large; download via scripts/download_peoplenet.sh)
+models/peoplenet/*.onnx
+models/peoplenet/*.engine
+models/peoplenet/*.trt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor
+.vscode/
+*.swp
