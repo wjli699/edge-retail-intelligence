@@ -1,356 +1,223 @@
-# 🧠 Edge Retail Intelligence Engine (Loitering Detection + ReID)
+# Edge Retail Intelligence Engine
 
-## 📌 Overview
-
-This project is a **production-oriented Edge AI system** for retail analytics, focused on:
-
-* **Loitering detection**
-* **Person tracking**
-* **Cross-camera re-identification (ReID)**
-* **Event-driven analytics API**
-
-The system is designed with a **high-performance C++ core engine** for real-time video processing and a **FastAPI control plane** for orchestration, configuration, and integration.
+Real-time edge AI for retail analytics: person detection, per-camera tracking, cross-camera re-identification (ReID), and loitering detection.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-[ Cameras / RTSP Streams ]
-            ↓
-   C++ Core Engine (DeepStream)
-   - Detection (Person)
-   - Tracking (Per-camera)
-   - ReID Embedding Extraction
-   - Metadata Serialization
-            ↓
-     Message Bus (ZeroMQ / Kafka)
-            ↓
-   Application Layer (FastAPI)
-   - Multi-camera correlation
-   - Loitering logic
-   - Event management
-   - REST APIs
-            ↓
-     Storage / Search / UI (Optional)
+[ RTSP Cameras ]
+      ↓
+C++ Core Engine  (DeepStream 6.2 / GStreamer / TensorRT)
+  • Person detection   — PeopleNet ResNet-34 INT8
+  • Per-camera tracking — NvDCF correlation-filter tracker
+  • Metadata extraction — GStreamer pad probe → JSONL events
+      ↓
+Message Bus  (Phase 2 — ZeroMQ / Kafka)
+      ↓
+Application Layer  (Phase 5 — FastAPI)
+  • Multi-camera ReID correlation
+  • Loitering detection (dwell-time + zone rules)
+  • REST API
+      ↓
+Storage / UI  (Phase 6 — optional)
 ```
 
 ---
 
-## 🎯 Key Features
+## Tech Stack
 
-### 🎥 C++ Core Engine
+| Layer | Technology |
+|---|---|
+| Video pipeline | C++17, NVIDIA DeepStream 6.2, GStreamer 1.16 |
+| Inference | PeopleNet v2.3.3 (ResNet-34), TensorRT INT8 |
+| Tracking | NvDCF (libnvds_nvmultiobjecttracker) |
+| Config | YAML (yaml-cpp) + INI (nvinfer) |
+| Messaging (Phase 2+) | ZeroMQ / Kafka |
+| API layer (Phase 5+) | FastAPI, Python 3.8+ |
+| Deployment | Docker / Docker Compose |
 
-* Multi-stream video ingestion (RTSP, file)
-* GPU-accelerated inference
-* Person detection (YOLO or equivalent)
-* Per-camera tracking
-* ReID embedding extraction
-* Configurable pipeline (YAML/INI)
-* Metadata export (JSON / protobuf)
-
----
-
-### 🧠 Intelligence Layer (FastAPI)
-
-* Multi-camera identity correlation (ReID matching)
-* Loitering detection:
-
-  * dwell time threshold
-  * zone-based monitoring
-* Event aggregation and filtering
-* REST API for:
-
-  * querying events
-  * configuring rules
-  * system monitoring
+Target hardware: **NVIDIA Jetson Orin NX** (JetPack 5.x) or x86 + NVIDIA GPU.
 
 ---
 
-### 🔄 Messaging Layer
+## Roadmap
 
-* Decouples real-time inference from business logic
-* Supports:
-
-  * ZeroMQ (edge lightweight)
-  * Kafka (scalable deployment)
-
----
-
-### 📊 Optional Extensions
-
-* Event storage (PostgreSQL / TimescaleDB)
-* Search (vector DB for ReID embeddings)
-* UI dashboard
-* Alerting (webhook, email)
+| Phase | Goal | Status |
+|---|---|---|
+| 1 | C++ DeepStream pipeline — detection, tracking, JSONL output | **Done** |
+| 2 | ZeroMQ / Kafka messaging | Planned |
+| 3 | ReID embedding extraction + cross-camera correlation | Planned |
+| 4 | Loitering detection engine (zones, dwell-time thresholds) | Planned |
+| 5 | FastAPI control plane (camera management, event query, rules) | Planned |
+| 6 | Production hardening — Docker, metrics, storage, UI | Planned |
 
 ---
 
-## 🧪 Example Use Case
+## Phase 1 — Quick Start
 
-**Retail Loitering Detection:**
+### Prerequisites
 
-1. Detect person entering a zone
-2. Track movement over time
-3. Extract ReID embedding
-4. Correlate across cameras
-5. If dwell time exceeds threshold → trigger event
+- NVIDIA DeepStream 6.2 SDK
+- CUDA Toolkit + TensorRT (included with JetPack 5.x on Jetson)
+- GStreamer 1.16+: `sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`
+- yaml-cpp: `sudo apt install libyaml-cpp-dev`
+- NGC CLI or `NGC_API_KEY` env var (for model download)
 
----
+### 1. Download PeopleNet model
 
-## 🧰 Tech Stack
-
-| Layer              | Technology                   |
-| ------------------ | ---------------------------- |
-| Video Pipeline     | C++ (DeepStream / GStreamer) |
-| Inference          | TensorRT                     |
-| Messaging          | ZeroMQ / Kafka               |
-| API Layer          | FastAPI (Python)             |
-| Storage (optional) | PostgreSQL / Redis           |
-| Deployment         | Docker / Docker Compose      |
-
----
-
-## 💻 Development Environment
-
-### Hardware
-
-* NVIDIA Jetson (Orin NX recommended) OR
-* x86 + NVIDIA GPU (RTX series)
-
----
-
-### Software Requirements
-
-#### Core Engine (C++)
-
-* Ubuntu 20.04/22.04
-* CUDA Toolkit
-* DeepStream SDK
-* TensorRT
-* GStreamer
-
-#### API Layer (Python)
-
-* Python 3.8+
-* FastAPI
-* Uvicorn
-* Pydantic
-
----
-
-### 📦 Setup (High-Level)
-
-#### 1. Clone Repository
-
-```
-git clone <repo>
-cd edge-retail-intelligence
+```bash
+./scripts/download_peoplenet.sh
 ```
 
-#### 2. Build C++ Engine
+This places `resnet34_peoplenet_int8.onnx` in `models/peoplenet/`. On first pipeline run, TensorRT auto-compiles it to `resnet34_peoplenet_int8.engine` (~5 min on Jetson Orin NX; cached for all subsequent runs).
 
-```
+### 2. Build
+
+```bash
 cd core_engine
-mkdir build && cd build
+mkdir -p build && cd build
 cmake ..
-make -j
+make -j$(nproc)
 ```
 
-#### 3. Start API Service
+### 3. Configure
 
+Edit `core_engine/configs/default.yaml` to point at your RTSP stream:
+
+```yaml
+sources:
+  - uri: "rtsp://192.168.9.146:18554/stream3"
+    enabled: true
 ```
-cd api
-pip install -r requirements.txt
-uvicorn main:app --reload
+
+### 4. Run
+
+```bash
+# Run from core_engine/ so config-relative paths resolve correctly
+cd core_engine
+./build/edge_retail_core_engine --config configs/default.yaml --verbose
 ```
 
-#### 4. Run System
+To capture events to a file, change `output.mode` in `default.yaml`:
 
-* Start message broker
-* Launch C++ pipeline
-* Start FastAPI
+```yaml
+output:
+  mode: file
+  file: /tmp/edge_retail_events.jsonl
+```
 
 ---
 
-## 📁 Project Structure
+## Output Format
+
+One JSON object per frame containing at least one detection, written to stdout (or a JSONL file):
+
+```json
+{
+  "event": "frame",
+  "ts_ms": 1713000000000,
+  "source_id": 0,
+  "frame": 142,
+  "detections": [
+    {
+      "class": 0,
+      "label": "person",
+      "conf": 0.8543,
+      "bbox": { "l": 312.0, "t": 88.0, "w": 96.0, "h": 260.0 },
+      "tid": 7
+    }
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `ts_ms` | Wall-clock timestamp (Unix ms) |
+| `source_id` | Camera / stream index (0-based) |
+| `frame` | Frame number within the stream |
+| `class` | 0 = person, 1 = bag, 2 = face |
+| `conf` | Detection confidence (0–1) |
+| `bbox` | Bounding box in pixels: left, top, width, height |
+| `tid` | Stable tracking ID assigned by NvDCF (absent if untracked) |
+
+---
+
+## Configuration Reference
+
+### `core_engine/configs/default.yaml`
+
+```yaml
+version: 1
+
+sources:
+  - uri: "rtsp://<host>:<port>/<path>"   # RTSP, file://, or device index
+    enabled: true
+
+models:
+  detector: "configs/config_infer_primary_peoplenet.txt"
+  tracker:  "configs/config_tracker_NvDCF.yml"
+
+output:
+  mode: stdout          # stdout | file
+  # file: /tmp/edge_retail_events.jsonl
+```
+
+### `core_engine/configs/config_infer_primary_peoplenet.txt` (key fields)
+
+| Field | Value | Notes |
+|---|---|---|
+| `onnx-file` | `../../models/peoplenet/resnet34_peoplenet_int8.onnx` | Relative to config file location |
+| `model-engine-file` | `../../models/peoplenet/resnet34_peoplenet_int8.engine` | Auto-generated TRT cache |
+| `network-mode` | `1` (INT8) | Switch to `2` (FP16) if INT8 calibration table is absent |
+| `infer-dims` | `3;544;960` | PeopleNet input: C×H×W |
+| `pre-cluster-threshold` | `0.3` (person), `0.2` (bag/face) | Confidence cutoff before NMS |
+
+### `core_engine/configs/config_tracker_NvDCF.yml` (key fields)
+
+| Field | Value | Notes |
+|---|---|---|
+| `maxTargetsPerStream` | `50` | Cap concurrent tracked identities |
+| `probationAge` | `2` | Frames before a tentative track is confirmed |
+| `maxShadowTrackingAge` | `51` | Frames to keep a lost target alive |
+| `visualTrackerType` | `1` (NvDCF) | Correlation-filter visual tracker |
+
+---
+
+## Project Structure
 
 ```
 edge-retail-intelligence/
-│
-├── core_engine/              # C++ DeepStream pipeline
+├── core_engine/
 │   ├── src/
-│   ├── include/
+│   │   ├── main.cpp        # Entry point, signal handling
+│   │   ├── app.cpp         # YAML config loader, output routing
+│   │   ├── pipeline.cpp    # DeepStream GStreamer pipeline
+│   │   └── metadata.cpp    # FrameEvent / Detection JSON serialiser
+│   ├── include/core_engine/
+│   │   ├── app.hpp
+│   │   ├── pipeline.hpp
+│   │   └── metadata.hpp
 │   ├── configs/
+│   │   ├── default.yaml
+│   │   ├── config_infer_primary_peoplenet.txt
+│   │   ├── config_tracker_NvDCF.yml
+│   │   └── peoplenet_labels.txt
 │   └── CMakeLists.txt
-│
-├── api/                     # FastAPI control plane
-│   ├── main.py
-│   ├── routes/
-│   ├── services/
-│   └── models/
-│
-├── messaging/               # Queue abstraction
-│   ├── zmq/
-│   └── kafka/
-│
-├── models/                  # AI models (ONNX / TRT engines)
-│
-├── scripts/                 # Setup / run scripts
-│
+├── models/peoplenet/       # Downloaded via scripts/download_peoplenet.sh
+├── scripts/
+│   └── download_peoplenet.sh
+├── api/                    # Phase 5 — FastAPI (not yet implemented)
+├── messaging/              # Phase 2 — ZeroMQ / Kafka (not yet implemented)
 └── README.md
 ```
 
 ---
 
-## 🚀 Roadmap (Phased Development)
+## Design Principles
 
----
-
-### 🟢 Phase 1 — C++ Core Pipeline (Foundation)
-
-**Goal:** Real-time single-camera intelligence
-
-* [ ] Build DeepStream pipeline
-* [ ] Integrate person detection model
-* [ ] Enable tracking (per stream)
-* [ ] Implement `pad_probe` metadata extraction
-* [ ] Output JSON events (stdout/file)
-
-👉 Deliverable:
-
-* Working pipeline with bounding boxes + tracking IDs
-
----
-
-### 🟡 Phase 2 — Messaging & Decoupling
-
-**Goal:** Separate pipeline from logic
-
-* [ ] Integrate ZeroMQ or Kafka producer
-* [ ] Serialize metadata (JSON/protobuf)
-* [ ] Build basic consumer service
-* [ ] Validate multi-stream ingestion
-
-👉 Deliverable:
-
-* Real-time metadata streaming system
-
----
-
-### 🔵 Phase 3 — ReID + Multi-Camera Correlation
-
-**Goal:** Identity across cameras
-
-* [ ] Add ReID model (embedding extraction)
-* [ ] Store embeddings temporarily
-* [ ] Implement similarity matching (cosine distance)
-* [ ] Build identity tracking across cameras
-
-👉 Deliverable:
-
-* Same person recognized across multiple streams
-
----
-
-### 🟣 Phase 4 — Loitering Detection Engine
-
-**Goal:** Business logic layer
-
-* [ ] Define zones (ROI polygons)
-* [ ] Track dwell time per identity
-* [ ] Trigger loitering events
-* [ ] Add configurable thresholds
-
-👉 Deliverable:
-
-* Accurate loitering alerts
-
----
-
-### 🟠 Phase 5 — FastAPI Control Plane
-
-**Goal:** System usability
-
-* [ ] REST API for:
-
-  * camera management
-  * rule configuration
-  * event query
-* [ ] Health monitoring endpoints
-* [ ] Config persistence
-
-👉 Deliverable:
-
-* Fully controllable system via API
-
----
-
-### 🔴 Phase 6 — Production Readiness
-
-**Goal:** Scale & polish
-
-* [ ] Dockerize services
-* [ ] Add logging + metrics
-* [ ] Optimize batching / latency
-* [ ] Add storage backend
-* [ ] Optional UI dashboard
-
-👉 Deliverable:
-
-* Deployable edge AI product
-
----
-
-## ⚖️ Design Principles
-
-* **Decoupled architecture** (pipeline ≠ intelligence)
-* **Real-time first** (low latency, high throughput)
-* **Extensible** (add models, rules easily)
-* **Edge-native** (Jetson optimized)
-* **Hybrid stack** (C++ + Python)
-
----
-
-## 🔥 Why This Project Matters
-
-This is not just a learning exercise—it mirrors **real-world Edge AI systems** used in:
-
-* Retail analytics
-* Smart cities
-* Security systems
-* Autonomous monitoring
-
-You will gain experience in:
-
-* GPU pipelines
-* distributed systems
-* AI deployment
-* system architecture
-
----
-
-## 📌 Future Enhancements
-
-* LLM-powered “search your cameras”
-* Behavior prediction
-* Cross-site analytics
-* Federated edge deployment
-* Integration with VMS systems
-
----
-
-## 🤝 Contribution
-
-Contributions are welcome:
-
-* New models
-* Performance optimizations
-* API extensions
-* Deployment improvements
-
----
-
-## 📄 License
-
-TBD
+- **Decoupled** — pipeline emits events; business logic lives upstream
+- **Real-time first** — low-latency pad probe, fakesink (no display overhead)
+- **Edge-native** — INT8 TensorRT, NvDCF tracker, Jetson-optimised
+- **Extensible** — add models, trackers, or output adapters without touching the pipeline core

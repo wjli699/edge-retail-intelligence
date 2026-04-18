@@ -1,0 +1,56 @@
+[property]
+gpu-id=0
+
+# Input normalisation: [0,1] range → scale = 1/255
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+
+# Model files — paths relative to THIS config file's directory (configs/).
+# ONNX lives at repo root models/peoplenet/ (see scripts/download_peoplenet.sh).
+onnx-file=../../models/peoplenet/resnet34_peoplenet_int8.onnx
+model-engine-file=../../models/peoplenet/resnet34_peoplenet_int8.engine
+labelfile-path=../configs/peoplenet_labels.txt
+
+# network-mode: 0=FP32, 1=INT8, 2=FP16
+# Use INT8 for Jetson Orin NX throughput; switch to 2 (FP16) if INT8 cal table is absent
+network-mode=1
+
+batch-size=1
+num-detected-classes=3
+interval=0
+
+# nvinfer identity used when multiple GIEs are chained
+gie-unique-id=1
+
+# process-mode: 1=primary detector
+process-mode=1
+
+# network-type: 0=detector
+network-type=0
+
+# cluster-mode: 2=NMS (suitable for detection heads)
+cluster-mode=2
+
+# PeopleNet ResNet-34 input: C×H×W = 3×544×960
+infer-dims=3;544;960
+
+# PeopleNet output layer names (ONNX export)
+output-blob-names=output_bbox/BiasAdd;output_cov/Sigmoid
+
+[class-attrs-all]
+pre-cluster-threshold=0.2
+topk=20
+nms-iou-threshold=0.5
+
+# Person — higher threshold to reduce false positives
+[class-attrs-0]
+pre-cluster-threshold=0.3
+topk=20
+
+# Bag
+[class-attrs-1]
+pre-cluster-threshold=0.2
+
+# Face
+[class-attrs-2]
+pre-cluster-threshold=0.2
