@@ -3,14 +3,17 @@ version: 1
 sources:
   - uri: "rtsp://192.168.9.146:18554/stream3"
     enabled: true
+  - uri: "rtsp://192.168.9.146:18554/stream4"   # second camera for cross-cam ReID
+    enabled: false                                # enable when second stream is available
 
 models:
   detector: "configs/config_infer_primary_peoplenet.txt"
   tracker:  "configs/config_tracker_NvDCF.yml"
+  reid:     "configs/config_infer_secondary_reid.txt"
 
 output:
   mode: zmq
   endpoint: "tcp://*:5555"
   # mode: stdout               # uncomment for local debugging
-  # mode: file                 # write JSONL to disk
+  # mode: file
   # file: /tmp/edge_retail_events.jsonl

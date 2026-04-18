@@ -36,6 +36,7 @@ bool App::load_config() {
     if (auto mdl = root["models"]) {
       cfg_.models.detector_config = mdl["detector"].as<std::string>("");
       cfg_.models.tracker_config  = mdl["tracker"].as<std::string>("");
+      cfg_.models.reid_config     = mdl["reid"].as<std::string>("");
     }
 
     if (auto out = root["output"]) {

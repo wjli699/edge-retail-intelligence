@@ -1,0 +1,39 @@
+[property]
+gpu-id=0
+
+# Secondary GIE: runs on each person crop produced by the primary GIE.
+# process-mode=2 → secondary (object-level)
+# operate-on-gie-id=1 → process objects detected by the primary GIE (PeopleNet)
+# operate-on-class-ids=0 → person class only
+process-mode=2
+operate-on-gie-id=1
+operate-on-class-ids=0
+
+# ReID model — NVIDIA TAO ReIdentificationNet (ResNet-50, Market-1501)
+# Download: scripts/download_reid.sh
+# Input:  3 × 256 × 128  (C × H × W, RGB)
+# Output: 512-dim L2-normalised embedding vector
+onnx-file=../../models/reid/resnet50_market1501.onnx
+model-engine-file=../../models/reid/resnet50_market1501.onnx_b8_gpu0_fp16.engine
+
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+infer-dims=3;256;128
+
+# network-mode: 2=FP16
+network-mode=2
+
+# batch-size: max person crops processed per inference call.
+# Set to the maximum number of persons expected across all camera frames in one batch.
+batch-size=8
+
+# network-type=1 (classifier) so DeepStream allocates NvDsClassifierMeta;
+# output-tensor-meta=1 additionally attaches raw tensors to NvDsObjectMeta
+# so the pad probe can read the embedding float array directly.
+network-type=1
+output-tensor-meta=1
+
+# gie-unique-id must match kReidGieId in pipeline.cpp (currently 2)
+gie-unique-id=2
+
+interval=0
