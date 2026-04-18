@@ -11,8 +11,9 @@ struct SourceConfig {
 };
 
 struct ModelConfig {
-  std::string detector_config;  // path to nvinfer config file (.txt)
+  std::string detector_config;  // path to nvinfer primary config (.txt)
   std::string tracker_config;   // path to nvtracker ll-config-file (.yml)
+  std::string reid_config;      // path to nvinfer secondary ReID config (.txt); optional
 };
 
 struct OutputConfig {

@@ -17,6 +17,9 @@ struct Detection {
   BBox bbox;
   uint64_t tracking_id{0};
   bool tracked{false};
+  // ReID embedding from secondary GIE (Phase 3+). Empty when SGIE not configured.
+  // Serialised as a base64-encoded block of little-endian float32 values.
+  std::vector<float> embedding;
 };
 
 struct FrameEvent {

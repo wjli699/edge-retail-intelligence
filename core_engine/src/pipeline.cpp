@@ -2,7 +2,9 @@
 #include "core_engine/metadata.hpp"
 
 #include <gstnvdsmeta.h>
+#include <gstnvdsinfer.h>
 #include <nvdsmeta.h>
+#include <nvdsinfer.h>
 
 #include <glib.h>
 #include <gst/gst.h>
@@ -14,7 +16,8 @@ namespace edge::retail::core {
 
 // PeopleNet v2.x class order: person=0, bag=1, face=2
 static const char* kLabels[] = {"person", "bag", "face"};
-static constexpr int kNumLabels = 3;
+static constexpr int kNumLabels   = 3;
+static constexpr guint kReidGieId = 2;  // must match gie-unique-id in SGIE config
 
 static int64_t now_ms() {
   using namespace std::chrono;
@@ -113,6 +116,28 @@ GstPadProbeReturn Pipeline::on_buffer_probe(GstPad* /*pad*/, GstPadProbeInfo* in
       d.tracking_id = om->object_id;
       d.tracked     = (om->object_id != UNTRACKED_OBJECT_ID);
 
+      // Extract ReID embedding from secondary GIE tensor meta (Phase 3+)
+      for (NvDsMetaList* l_um = om->obj_user_meta_list; l_um; l_um = l_um->next) {
+        auto* um = static_cast<NvDsUserMeta*>(l_um->data);
+        if (um->base_meta.meta_type != NVDSINFER_TENSOR_OUTPUT_META) continue;
+
+        auto* tmeta = static_cast<NvDsInferTensorMeta*>(um->user_meta_data);
+        if (tmeta->unique_id != kReidGieId) continue;
+
+        for (guint li = 0; li < tmeta->num_output_layers; ++li) {
+          const NvDsInferLayerInfo& linfo = tmeta->output_layers_info[li];
+          if (linfo.isInput) continue;
+          auto* data = static_cast<float*>(tmeta->out_buf_ptrs_host[li]);
+          // Flatten all dims to get total element count
+          int n = 1;
+          for (unsigned di = 0; di < linfo.inferDims.numDims; ++di)
+            n *= linfo.inferDims.d[di];
+          d.embedding.assign(data, data + n);
+          break;
+        }
+        break;
+      }
+
       evt.detections.push_back(d);
     }
 
@@ -164,13 +189,17 @@ gboolean Pipeline::on_bus_message(GstBus* /*bus*/, GstMessage* msg, gpointer dat
 // Pipeline construction
 //
 //   nvurisrcbin(s) --[pad-added]--> nvstreammux
-//   nvstreammux --> nvinfer(PeopleNet) --> nvtracker --> fakesink
-//                                              ^
-//                                        pad_probe (emits JSON)
 //
-// nvdsosd is intentionally absent: it pins NVMM surfaces to draw overlays,
-// causing "NvDecGetSurfPinHandle: Surface not registered" races on Jetson
-// when using fakesink (headless). The OSD serves no purpose here.
+// Without ReID (reid_config empty):
+//   nvstreammux → nvinfer(PeopleNet) → nvtracker → fakesink
+//
+// With ReID (reid_config set):
+//   nvstreammux → nvinfer(PeopleNet) → nvinfer(ReID/SGIE) → nvtracker → fakesink
+//                                                                ^
+//                                                          pad_probe: extracts
+//                                                          detections + embeddings
+//
+// nvdsosd is absent: it pins NVMM surfaces (NvDecGetSurfPinHandle races on Jetson).
 // ---------------------------------------------------------------------------
 
 bool Pipeline::build() {
@@ -186,6 +215,17 @@ bool Pipeline::build() {
   if (!pipeline_ || !streammux_ || !pgie_ || !tracker_ || !sink_) {
     std::cerr << "[pipeline] Failed to create one or more GStreamer elements\n";
     return false;
+  }
+
+  // Optional secondary GIE for ReID embedding extraction
+  if (!cfg_.models.reid_config.empty()) {
+    sgie_ = gst_element_factory_make("nvinfer", "sgie");
+    if (!sgie_) {
+      std::cerr << "[pipeline] Failed to create secondary nvinfer (sgie)\n";
+      return false;
+    }
+    g_object_set(sgie_, "config-file-path", cfg_.models.reid_config.c_str(), nullptr);
+    std::cerr << "[pipeline] ReID SGIE enabled: " << cfg_.models.reid_config << "\n";
   }
 
   // Count enabled sources for batch-size
@@ -215,11 +255,20 @@ bool Pipeline::build() {
   g_object_set(sink_, "sync", (gboolean)FALSE, nullptr);
 
   // Add static elements and link the main chain
-  gst_bin_add_many(GST_BIN(pipeline_),
-                   streammux_, pgie_, tracker_, sink_, nullptr);
-  if (!gst_element_link_many(streammux_, pgie_, tracker_, sink_, nullptr)) {
-    std::cerr << "[pipeline] Failed to link main chain\n";
-    return false;
+  if (sgie_) {
+    gst_bin_add_many(GST_BIN(pipeline_),
+                     streammux_, pgie_, sgie_, tracker_, sink_, nullptr);
+    if (!gst_element_link_many(streammux_, pgie_, sgie_, tracker_, sink_, nullptr)) {
+      std::cerr << "[pipeline] Failed to link main chain (with SGIE)\n";
+      return false;
+    }
+  } else {
+    gst_bin_add_many(GST_BIN(pipeline_),
+                     streammux_, pgie_, tracker_, sink_, nullptr);
+    if (!gst_element_link_many(streammux_, pgie_, tracker_, sink_, nullptr)) {
+      std::cerr << "[pipeline] Failed to link main chain\n";
+      return false;
+    }
   }
 
   // Add one nvurisrcbin per enabled source, connect via pad-added signal

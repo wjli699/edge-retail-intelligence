@@ -40,9 +40,10 @@ class Pipeline {
 
   GstElement* pipeline_{nullptr};
   GstElement* streammux_{nullptr};
-  GstElement* pgie_{nullptr};    // nvinfer — PeopleNet
+  GstElement* pgie_{nullptr};    // nvinfer primary — PeopleNet detection
+  GstElement* sgie_{nullptr};    // nvinfer secondary — ReID embeddings (optional)
   GstElement* tracker_{nullptr}; // nvtracker — NvDCF
-  GstElement* sink_{nullptr};    // fakesink (headless — no OSD needed)
+  GstElement* sink_{nullptr};    // fakesink (headless)
 
   GMainLoop* loop_{nullptr};
 
