@@ -164,9 +164,13 @@ gboolean Pipeline::on_bus_message(GstBus* /*bus*/, GstMessage* msg, gpointer dat
 // Pipeline construction
 //
 //   nvurisrcbin(s) --[pad-added]--> nvstreammux
-//   nvstreammux --> nvinfer(PeopleNet) --> nvtracker --> nvdsosd --> fakesink
+//   nvstreammux --> nvinfer(PeopleNet) --> nvtracker --> fakesink
 //                                              ^
 //                                        pad_probe (emits JSON)
+//
+// nvdsosd is intentionally absent: it pins NVMM surfaces to draw overlays,
+// causing "NvDecGetSurfPinHandle: Surface not registered" races on Jetson
+// when using fakesink (headless). The OSD serves no purpose here.
 // ---------------------------------------------------------------------------
 
 bool Pipeline::build() {
@@ -177,10 +181,9 @@ bool Pipeline::build() {
   streammux_ = gst_element_factory_make("nvstreammux", "muxer");
   pgie_      = gst_element_factory_make("nvinfer",     "pgie");
   tracker_   = gst_element_factory_make("nvtracker",   "tracker");
-  osd_       = gst_element_factory_make("nvdsosd",     "osd");
   sink_      = gst_element_factory_make("fakesink",    "sink");
 
-  if (!pipeline_ || !streammux_ || !pgie_ || !tracker_ || !osd_ || !sink_) {
+  if (!pipeline_ || !streammux_ || !pgie_ || !tracker_ || !sink_) {
     std::cerr << "[pipeline] Failed to create one or more GStreamer elements\n";
     return false;
   }
@@ -213,8 +216,8 @@ bool Pipeline::build() {
 
   // Add static elements and link the main chain
   gst_bin_add_many(GST_BIN(pipeline_),
-                   streammux_, pgie_, tracker_, osd_, sink_, nullptr);
-  if (!gst_element_link_many(streammux_, pgie_, tracker_, osd_, sink_, nullptr)) {
+                   streammux_, pgie_, tracker_, sink_, nullptr);
+  if (!gst_element_link_many(streammux_, pgie_, tracker_, sink_, nullptr)) {
     std::cerr << "[pipeline] Failed to link main chain\n";
     return false;
   }

@@ -16,8 +16,9 @@ struct ModelConfig {
 };
 
 struct OutputConfig {
-  std::string mode{"stdout"};  // "stdout" or "file"
+  std::string mode{"zmq"};              // "stdout" | "file" | "zmq"
   std::string file_path;
+  std::string endpoint{"tcp://*:5555"}; // ZMQ bind address (mode=zmq)
 };
 
 struct AppConfig {

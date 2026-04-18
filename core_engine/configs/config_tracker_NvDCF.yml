@@ -1,6 +1,11 @@
 %YAML:1.0
-# NvDCF tracker configuration for edge retail (Phase 1 — person tracking)
-# Algorithm: NvDCF (visual correlation filter) via libnvds_nvmultiobjecttracker.so
+# NvDCF tracker — Kalman filter + IoU association, visual features OFF.
+# visualTrackerType=0 (DUMMY) means the tracker uses only bbox geometry
+# (Kalman prediction + IoU matching) and never pins NVMM surfaces for pixel
+# access. This eliminates "NvDecGetSurfPinHandle: Surface not registered"
+# warnings caused by NvDCF's correlation filter holding surface pins past
+# the NVDEC pool recycle window on Jetson.
+# Visual ReID features will be re-enabled in Phase 3.
 
 BaseConfig:
   minDetectorConfidence: 0.10    # Discard detections below this before tracking
@@ -28,11 +33,11 @@ DataAssociator:
   minMatchingScore4Overall: 0.4290
   minMatchingScore4SizeSimilarity: 0.3627
   minMatchingScore4Iou: 0.2575
-  minMatchingScore4VisualSimilarity: 0.5356
+  minMatchingScore4VisualSimilarity: 0.0    # unused — visual tracker is OFF
 
-  matchingScoreWeight4VisualSimilarity: 0.3370
-  matchingScoreWeight4SizeSimilarity: 0.4354
-  matchingScoreWeight4Iou: 0.3656
+  matchingScoreWeight4VisualSimilarity: 0.0  # weight zeroed; size + IoU only
+  matchingScoreWeight4SizeSimilarity: 0.6
+  matchingScoreWeight4Iou: 0.4
 
   tentativeDetectorConfidence: 0.2008
   minMatchingScore4TentativeIou: 0.5296
@@ -47,9 +52,5 @@ StateEstimator:
   measurementNoiseVar4Tracker: 8.1505
 
 VisualTracker:
-  visualTrackerType: 1           # 1=NvDCF correlation filter
-
-  useColorNames: 1
-  useHog: 0
-  featureImgSizeLevel: 2
-  featureFocusOffsetFactor_y: -0.2000
+  visualTrackerType: 0           # DUMMY — no pixel access, no NVMM surface pinning
+                                 # Re-enable (set to 1) in Phase 3 when ReID is added
