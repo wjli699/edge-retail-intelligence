@@ -8,12 +8,16 @@ model-color-format=0
 # Model files — paths relative to THIS config file's directory (configs/).
 # ONNX lives at repo root models/peoplenet/ (see scripts/download_peoplenet.sh).
 onnx-file=../../models/peoplenet/resnet34_peoplenet_int8.onnx
-model-engine-file=../../models/peoplenet/resnet34_peoplenet_int8.engine
+# Engine filename must match what TRT auto-generates: <onnx>_b<batch>_gpu<id>_<precision>.engine
+# Without an INT8 calibration table, TRT falls back to FP16 and uses this exact name.
+model-engine-file=../../models/peoplenet/resnet34_peoplenet_int8.onnx_b1_gpu0_fp16.engine
 labelfile-path=../configs/peoplenet_labels.txt
 
 # network-mode: 0=FP32, 1=INT8, 2=FP16
-# Use INT8 for Jetson Orin NX throughput; switch to 2 (FP16) if INT8 cal table is absent
-network-mode=1
+# FP16 — no INT8 calibration table available for this model download.
+# Tactic-memory warnings during the one-time build are normal; TRT skips
+# kernels that don't fit alongside the live RTSP decoder and uses alternatives.
+network-mode=2
 
 batch-size=1
 num-detected-classes=3
