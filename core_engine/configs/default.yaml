@@ -5,14 +5,12 @@ sources:
     enabled: true
 
 models:
-  # Path relative to the working directory where the binary is invoked.
-  # Run from core_engine/build/ so "../configs/..." resolves correctly for
-  # nvinfer (which resolves onnx-file / model-engine-file relative to its own
-  # config file location).
   detector: "configs/config_infer_primary_peoplenet.txt"
   tracker:  "configs/config_tracker_NvDCF.yml"
 
 output:
-  mode: stdout
-  # mode: file
+  mode: zmq
+  endpoint: "tcp://*:5555"
+  # mode: stdout               # uncomment for local debugging
+  # mode: file                 # write JSONL to disk
   # file: /tmp/edge_retail_events.jsonl

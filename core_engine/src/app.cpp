@@ -1,10 +1,12 @@
 #include "core_engine/app.hpp"
 #include "core_engine/pipeline.hpp"
+#include "core_engine/publisher.hpp"
 
 #include <yaml-cpp/yaml.h>
 
 #include <fstream>
 #include <iostream>
+#include <memory>
 
 namespace edge::retail::core {
 
@@ -37,7 +39,8 @@ bool App::load_config() {
     }
 
     if (auto out = root["output"]) {
-      cfg_.output.mode = out["mode"].as<std::string>("stdout");
+      cfg_.output.mode     = out["mode"].as<std::string>("zmq");
+      cfg_.output.endpoint = out["endpoint"].as<std::string>("tcp://*:5555");
       if (out["file"]) cfg_.output.file_path = out["file"].as<std::string>();
     }
 
@@ -52,28 +55,54 @@ int App::run() {
   if (!load_config()) return 1;
 
   if (cfg_.verbose) {
-    std::cerr << "[app] Sources   : " << cfg_.sources.size() << "\n";
-    std::cerr << "[app] Detector  : " << cfg_.models.detector_config << "\n";
-    std::cerr << "[app] Tracker   : " << cfg_.models.tracker_config << "\n";
-    std::cerr << "[app] Output    : " << cfg_.output.mode << "\n";
+    std::cerr << "[app] Sources  : " << cfg_.sources.size() << "\n";
+    std::cerr << "[app] Detector : " << cfg_.models.detector_config << "\n";
+    std::cerr << "[app] Tracker  : " << cfg_.models.tracker_config << "\n";
+    std::cerr << "[app] Output   : " << cfg_.output.mode;
+    if (cfg_.output.mode == "zmq")
+      std::cerr << " (" << cfg_.output.endpoint << ")";
+    std::cerr << "\n";
   }
 
-  std::ostream* out = &std::cout;
+  // Build the event callback based on output mode
+  EventCallback cb;
+  std::unique_ptr<Publisher> pub;
+  std::ostream* stream_out = &std::cout;
   std::ofstream file_out;
-  if (cfg_.output.mode == "file" && !cfg_.output.file_path.empty()) {
+
+  if (cfg_.output.mode == "zmq") {
+    try {
+      pub = std::make_unique<Publisher>(cfg_.output.endpoint);
+    } catch (const std::exception& e) {
+      std::cerr << "[app] " << e.what() << "\n";
+      return 1;
+    }
+    cb = [&pub](const std::string& json) { pub->send(json); };
+
+  } else if (cfg_.output.mode == "file") {
+    if (cfg_.output.file_path.empty()) {
+      std::cerr << "[app] output.mode=file but no output.file specified\n";
+      return 1;
+    }
     file_out.open(cfg_.output.file_path, std::ios::app);
     if (!file_out) {
       std::cerr << "[app] Cannot open output file: " << cfg_.output.file_path << "\n";
       return 1;
     }
-    out = &file_out;
+    stream_out = &file_out;
+    cb = [stream_out](const std::string& json) {
+      *stream_out << json << "\n";
+      stream_out->flush();
+    };
+
+  } else {  // stdout
+    cb = [](const std::string& json) {
+      std::cout << json << "\n";
+      std::cout.flush();
+    };
   }
 
-  Pipeline pipeline(cfg_, [out](const std::string& json) {
-    *out << json << "\n";
-    out->flush();
-  });
-
+  Pipeline pipeline(cfg_, std::move(cb));
   g_pipeline = &pipeline;
   int ret = pipeline.run();
   g_pipeline = nullptr;
