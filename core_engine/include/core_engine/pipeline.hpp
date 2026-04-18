@@ -42,8 +42,7 @@ class Pipeline {
   GstElement* streammux_{nullptr};
   GstElement* pgie_{nullptr};    // nvinfer — PeopleNet
   GstElement* tracker_{nullptr}; // nvtracker — NvDCF
-  GstElement* osd_{nullptr};     // nvdsosd
-  GstElement* sink_{nullptr};    // fakesink
+  GstElement* sink_{nullptr};    // fakesink (headless — no OSD needed)
 
   GMainLoop* loop_{nullptr};
 
