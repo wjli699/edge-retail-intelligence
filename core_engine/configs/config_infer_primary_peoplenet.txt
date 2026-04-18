@@ -34,8 +34,8 @@ cluster-mode=2
 # PeopleNet ResNet-34 input: C×H×W = 3×544×960
 infer-dims=3;544;960
 
-# PeopleNet output layer names (ONNX export)
-output-blob-names=output_bbox/BiasAdd;output_cov/Sigmoid
+# TensorRT explicit-batch engines expose ONNX tensor names with a :0 suffix.
+output-blob-names=output_bbox/BiasAdd:0;output_cov/Sigmoid:0
 
 [class-attrs-all]
 pre-cluster-threshold=0.2
