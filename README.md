@@ -276,33 +276,30 @@ PeopleNet ships with an INT8 calibration table. OSNet/ReID uses FP16.
 
 ---
 
-### 3. NVIDIA TAO Toolkit — ETLT Format and Its Pitfalls
+### 3. NVIDIA TAO Toolkit — ETLT Format (Dead End for This Project)
 
-TAO (Train, Adapt, Optimize) is NVIDIA's MLOps toolkit for fine-tuning and exporting models. It exports in **ETLT** (Encrypted TLT) format — an AES-256 encrypted ONNX file.
+> **This project does not use TAO.** This section documents a failed evaluation path so others don't repeat it.
 
-**ETLT decryption requires the correct key**: every ETLT is encrypted with a key set at export time. NVIDIA's public TAO models are documented as using key `nvidia_tlt`, but this is not universally true. The `reidentificationnet:deployable_v1.0` ETLT could not be decrypted with any commonly documented key (`nvidia_tlt`, `tlt_encode`).
+TAO (Train, Adapt, Optimize) is NVIDIA's MLOps toolkit for fine-tuning pretrained models and exporting them in **ETLT** (Encrypted TLT) format — an AES-256 encrypted ONNX wrapper.
 
-**`tao-converter` is the official decrypt + TRT build tool**:
+**Why we tried it**: NVIDIA hosts a `reidentificationnet:deployable_v1.0` model on NGC that looks like a drop-in ReID solution for DeepStream.
+
+**Why it didn't work**: ETLT decryption requires the key used at export time. NVIDIA's docs say public TAO models use key `nvidia_tlt`, but `reidentificationnet:deployable_v1.0` cannot be decrypted with `nvidia_tlt` or any other documented key. There is no public API to discover the correct key. `tao-converter v4.0.0` and `v3.22.05` both fail silently.
+
+**What we use instead**: open-source OSNet ONNX exported via `scripts/export_reid_onnx.py`. Plain ONNX has no encryption, TRT builds it directly, and the architecture is well-documented.
+
+**Reference — `tao-converter` usage** (if you have a model with a known key):
 ```bash
 tao-converter \
-  -k nvidia_tlt        # decryption key
-  -d 3,256,128         # input dims (C,H,W) — no batch
+  -k <key>             # decryption key
+  -d 3,256,128         # input dims (C,H,W) — no batch dimension
   -o fc_pred           # output layer name
   -t fp16              # precision
   -m 8                 # max batch size
-  -e output.engine     # engine destination
+  -e output.engine     # TRT engine destination
   model.etlt
 ```
-
-Key facts about `tao-converter`:
-- It is **platform-specific** — the aarch64 build for TRT 8.5.x is `v4.0.0_trt8.5.2.2_aarch64` on NGC. Download via `ngc registry resource download-version`.
-- It links against `libcrypto.so.1.1` (OpenSSL 1.1). Verify with `ldd`.
-- **`tao-converter` is deprecated** as of 2023 in favour of `nvidia-tao-deploy` pip package. However `nvidia-tao-deploy` is complex to install on Jetson due to CUDA dependency mismatches.
-- Engines built by `tao-converter` can be consumed by nvinfer using only `model-engine-file` (no `onnx-file` or `tlt-encoded-model` needed).
-
-**DeepStream can consume ETLT directly** via `tlt-encoded-model` + `tlt-model-key` in the nvinfer config (no tao-converter needed). However this calls the same decryption path internally, so a wrong key fails the same way.
-
-**Practical lesson**: if an NVIDIA TAO ETLT from NGC fails to decrypt, the key is simply not `nvidia_tlt`. There is no public API to discover it. The pragmatic solution is to use an open-source ONNX model with equivalent architecture.
+Platform-specific binary — for TRT 8.5.x on Jetson use `v4.0.0_trt8.5.2.2_aarch64` from NGC. Find the right version ID via the REST API (see §4 below).
 
 ---
 
