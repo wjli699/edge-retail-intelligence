@@ -10,15 +10,15 @@ Real-time edge AI for retail analytics: person detection, per-camera tracking, c
 [ RTSP Cameras ]
       ↓
 C++ Core Engine  (DeepStream 6.2 / GStreamer / TensorRT)
-  • Person detection    — PeopleNet ResNet-34 INT8
-  • Per-camera tracking — NvDCF correlation-filter tracker
-  • ReID embedding      — OSNet-x1.0 FP16 SGIE (512-dim per person crop)
-  • Metadata extraction — GStreamer pad probe → JSONL events over ZeroMQ
+  • Person detection       — PeopleNet ResNet-34 INT8
+  • Per-camera tracking    — NvDCF correlation-filter tracker
+  • ReID embedding         — ResNet50 FP16 SGIE (256-dim per person crop)
+  • Cross-camera global ID — cosine gallery in pad probe; color-coded OSD boxes
+  • Metadata extraction    — GStreamer pad probe → JSONL events over ZeroMQ
       ↓
 Message Bus  (ZeroMQ PUB/SUB)
       ↓
 Application Layer  (Phase 5 — FastAPI)
-  • Cross-camera ReID correlation
   • Loitering detection (dwell-time + zone rules)
   • REST API
 ```
@@ -31,7 +31,7 @@ Application Layer  (Phase 5 — FastAPI)
 |---|---|
 | Video pipeline | C++17, NVIDIA DeepStream 6.2, GStreamer 1.16 |
 | Primary inference | PeopleNet v2.3.3 (ResNet-34), TensorRT INT8 |
-| Secondary inference | OSNet-x1.0, TensorRT FP16, SGIE mode |
+| Secondary inference | ResNet50 (Market-1501 + AI City 156), TensorRT FP16, SGIE mode |
 | Tracking | NvDCF (`libnvds_nvmultiobjecttracker`) |
 | Messaging | ZeroMQ PUB/SUB |
 | Config | YAML (yaml-cpp) + INI (nvinfer .txt format) |
@@ -47,7 +47,7 @@ Target hardware: **NVIDIA Jetson Orin NX** — JetPack 5.x (L4T R35), CUDA 11.4,
 |---|---|---|
 | 1 | C++ DeepStream pipeline — detection, tracking, JSONL output | **Done** |
 | 2 | ZeroMQ / Kafka messaging | **Done** |
-| 3 | ReID embedding extraction + cross-camera correlation | **In progress** |
+| 3 | ReID embedding extraction + cross-camera correlation | **Done** |
 | 4 | Loitering detection engine (zones, dwell-time thresholds) | Planned |
 | 5 | FastAPI control plane | Planned |
 | 6 | Production hardening — Docker, metrics, storage, UI | Planned |
@@ -70,14 +70,15 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-cp
 pip3 install torchreid gdown
 ```
 
-### 1. Download & export models
+### 1. Download models
 
 ```bash
-# PeopleNet (Phase 1)
+# PeopleNet (Phase 1) — NGC account or API key required
 ./scripts/download_peoplenet.sh
 
-# ReID — exports OSNet-x1.0 to ONNX (no NGC account needed)
-python3 scripts/export_reid_onnx.py
+# ReID — ResNet50 ONNX downloaded directly (no NGC account needed)
+# Place resnet50_market1501_aicity156.onnx in models/reid/
+# TRT engine is auto-built on first run (~3 min on Orin NX)
 ```
 
 ### 2. Build
@@ -92,36 +93,48 @@ make -j$(nproc)
 ### 3. Run
 
 ```bash
-# Terminal 1 — inference pipeline (headless ZMQ mode)
+# Terminal 1 — inference pipeline
 cd core_engine
 ./build/edge_retail_core_engine --config configs/default.yaml --verbose
 
-# Terminal 2 — ZMQ consumer
+# Terminal 2 — ZMQ consumer (raw frame events)
 cd messaging/zmq
 python3 consumer.py --endpoint tcp://localhost:5555 --filter person
 
 # Terminal 2 (alt) — cross-camera ReID matcher
-python3 reid_matcher.py --endpoint tcp://localhost:5555 --threshold 0.85
+python3 reid_matcher.py --endpoint tcp://localhost:5555 --threshold 0.75
+# Prints reid_identity (new person seen) and reid_link (same person confirmed across cameras)
+# --status-interval 30  prints a periodic identity table to stderr
+
+# Terminal 3 (optional) — embedding quality diagnostic
+python3 reid_probe.py --endpoint tcp://localhost:5555 --frames 500
+# Coverage should be 100%, inter-ID cosine sim mean < 0.55, gap >= 0.30
 ```
 
-On first run, nvinfer auto-builds TRT engines from the ONNX files (~5 min each on Orin NX). Subsequent starts load the cached `.engine` files instantly.
+On first run, nvinfer auto-builds TRT engines from the ONNX files (~3–5 min each on Orin NX). Subsequent starts load the cached `.engine` files instantly.
 
-**Annotated video output** — set `output.osd_file` in `default.yaml` to record an MKV file with bounding boxes and tracking IDs drawn on a tiled view of all camera streams:
+**Annotated video + live display** — set `osd_file` and/or `osd_display` in `default.yaml`:
+
+```yaml
+output:
+  osd_file: "/tmp/reid_annotated.mkv"   # record MKV with annotated boxes
+  osd_display: true                     # open live preview window simultaneously
+```
+
+The OSD draws color-coded bounding boxes keyed by **global ID** (same color = same physical person across cameras) with `ID:N` and per-camera `tid:M` labels. The side-by-side tiled view shows all sources at 960×540 per tile.
 
 ```bash
-# In default.yaml: output.osd_file: "/tmp/reid_annotated.mkv"
-./build/edge_retail_core_engine --config configs/default.yaml --verbose
-# Ctrl+C to stop, then:
+# Playback recorded file (use ffplay — VLC 3.0.x crashes on Jetson ARM64):
 ffplay /tmp/reid_annotated.mkv
 ```
-
-The output is a side-by-side tiled view (one column per source, each tile at 960×540 / 16:9). Note: VLC 3.0.x on Jetson ARM64 crashes on playback due to a GPU acceleration bug — use `ffplay` instead.
 
 ---
 
 ## Output Format
 
-One JSON object per frame, written to the configured output (ZMQ / stdout / file):
+### Frame events (C++ pipeline → ZMQ)
+
+One JSON object per frame with ≥1 detection:
 
 ```json
 {
@@ -136,7 +149,7 @@ One JSON object per frame, written to the configured output (ZMQ / stdout / file
       "conf": 0.8543,
       "bbox": { "l": 312.0, "t": 88.0, "w": 96.0, "h": 260.0 },
       "tid": 7,
-      "reid_embedding": [0.023, -0.107, ...]
+      "emb": "<base64-encoded float32[256]>"
     }
   ]
 }
@@ -146,8 +159,20 @@ One JSON object per frame, written to the configured output (ZMQ / stdout / file
 |---|---|
 | `ts_ms` | Wall-clock timestamp (Unix ms) |
 | `source_id` | Camera index (0-based) |
-| `tid` | Stable per-camera tracking ID (NvDCF) |
-| `reid_embedding` | 512-d float vector; cosine-similarity across cameras identifies the same person |
+| `tid` | Per-camera tracking ID assigned by NvDCF (resets per stream) |
+| `emb` | Base64-encoded 256-d float32 ReID embedding; L2-normalised |
+
+### ReID events (`reid_matcher.py` → stdout)
+
+`reid_matcher.py` emits events **once per new identity or new cross-camera link** — not every frame:
+
+```json
+{"event":"reid_identity","ts_ms":1713000000000,"global_id":5,"source_id":0,"tid":3}
+{"event":"reid_link","ts_ms":1713000000000,"global_id":5,
+ "cam_a":{"source_id":0,"tid":3},"cam_b":{"source_id":1,"tid":7},"similarity":0.912}
+```
+
+`global_id` is the stable cross-camera identity number. The same person seen on cameras 0 and 1 will share a `global_id` and appear with the same color in the OSD annotated video.
 
 ---
 
@@ -171,23 +196,31 @@ output:
   mode: zmq                    # zmq | stdout | file
   endpoint: "tcp://*:5555"
   osd_file: "/tmp/reid_annotated.mkv"  # remove this line to disable OSD recording
+  osd_display: true            # open live preview window (nveglglessink); set false to disable
 ```
 
-`osd_file` enables an annotated video recording branch: `nvmultistreamtiler → nvdsosd → nvvideoconvert → nvv4l2h264enc → h264parse → matroskamux → filesink`. Removing the key reverts to `fakesink` (headless). MKV is used instead of MP4 because `matroskamux` writes its index progressively and survives Ctrl+C; `qtmux`/`mp4mux` write the moov atom only at EOS and produce unplayable files if the pipeline is interrupted.
+`osd_file` and `osd_display` each independently enable an OSD branch. When both are set, a `tee` element splits the stream:
+- **`osd_file`** branch: `nvmultistreamtiler → nvdsosd → nvvideoconvert → nvv4l2h264enc → h264parse → matroskamux → filesink`
+- **`osd_display`** branch: `nvmultistreamtiler → nvdsosd → nvvideoconvert → [caps:video/x-raw,format=RGBA] → nveglglessink`
+
+The CPU caps (`video/x-raw, format=RGBA`) on the display branch are required — `nveglglessink` cannot handle NVMM surface arrays. MKV is used instead of MP4 because `matroskamux` writes its index progressively and survives Ctrl+C; `qtmux`/`mp4mux` write the moov atom only at EOS and produce unplayable files if interrupted.
 
 ### `configs/config_infer_secondary_reid.txt` (key fields)
 
 | Field | Value | Notes |
 |---|---|---|
 | `process-mode` | `2` | Secondary GIE (SGIE) — runs on object crops, not full frames |
-| `operate-on-gie-id` | `1` | Receives crops from primary GIE (PeopleNet) |
+| ~~`operate-on-gie-id`~~ | *(removed)* | **Do not set.** NvDCF tracker changes `unique_component_id` on tracked objects, so filtering by PGIE ID causes ~95% of crops to be skipped silently |
 | `operate-on-class-ids` | `0` | Person class only |
-| `onnx-file` | `osnet_x1_0_market1501.onnx` | Source model; TRT engine built from this on first run |
+| `onnx-file` | `resnet50_market1501_aicity156.onnx` | Source model; TRT engine built from this on first run (~3 min) |
+| `net-scale-factor` | `0.017352607709750568` | ImageNet std normalisation (≈ 1/57.63); **required** — model has no preprocessing baked in |
+| `offsets` | `123.675;116.28;103.53` | ImageNet mean subtraction (R;G;B); **required** — without this all embeddings collapse to cosine sim ≈ 0.875 |
 | `network-mode` | `2` | FP16 inference |
-| `batch-size` | `8` | Max person crops per inference call; tune to GPU memory |
-| `network-type` | `1` | Classifier — allocates `NvDsClassifierMeta` per object |
+| `batch-size` | `8` | Max person crops per inference call |
+| `network-type` | `100` | OTHER — raw tensor output (not classifier); do **not** use `1` (classifier) for embedding models |
 | `output-tensor-meta` | `1` | Attaches raw float tensors to `NvDsObjectMeta` for pad-probe access |
 | `gie-unique-id` | `2` | Must match `kReidGieId` constant in `pipeline.cpp` |
+| `interval` | `0` | Infer every frame; `secondary-reinfer-interval` GObject property is additionally set to `1` in C++ |
 
 ---
 
@@ -212,10 +245,12 @@ edge-retail-intelligence/
 │   └── reid/                 # Generated via export_reid_onnx.py
 ├── scripts/
 │   ├── download_peoplenet.sh
-│   ├── download_reid.sh      # Downloads NVIDIA TAO ETLT (reference only)
-│   └── export_reid_onnx.py   # Exports OSNet to ONNX — use this instead
+│   ├── download_reid.sh      # Downloads NVIDIA TAO ETLT (reference only — TAO key is not public)
+│   └── export_reid_onnx.py   # Exports OSNet to ONNX (legacy — project now uses ResNet50)
 └── messaging/zmq/
-    └── consumer.py
+    ├── consumer.py           # Raw ZMQ subscriber — prints all frame events
+    ├── reid_matcher.py       # Cross-camera ReID matcher — emits reid_identity / reid_link events
+    └── reid_probe.py         # Embedding quality diagnostic — coverage, norm, cosine sim distribution
 ```
 
 ---
@@ -237,11 +272,22 @@ DeepStream's inference elements (`nvinfer`) run in two modes set by `process-mod
 
 **How SGIE receives crops**: the PGIE attaches `NvDsObjectMeta` for each detection. The SGIE reads `operate-on-gie-id` and `operate-on-class-ids` to decide which detections to process. It automatically crops and resizes those bounding boxes to `infer-dims` before running inference — you do not crop manually.
 
-**Pad probe placement matters**: the probe in this project sits on the **nvtracker src pad**, not the SGIE src pad. This means when the probe fires, the PGIE *and* SGIE have already run. The ReID embedding is already populated in `NvDsObjectMeta` — you just read it from the tensor metadata.
+**Pad probe placement matters**: the probe in this project sits on the **SGIE src pad** (falling back to the nvtracker src pad when SGIE is disabled). This means when the probe fires, both PGIE and SGIE have already run and the ReID embedding is populated in `NvDsObjectMeta` — you read it from the tensor metadata.
 
-**`output-tensor-meta=1` is required for embeddings**: by default, SGIE with `network-type=1` (classifier) only writes the argmax class label into `NvDsClassifierMeta`. Setting `output-tensor-meta=1` additionally attaches the raw float buffer to `NvDsObjectMeta::tensor_output_list`, which lets the pad probe read the full 512-d embedding vector.
+**Pipeline element order is critical**: SGIE must come **after** nvtracker in the pipeline graph. If SGIE is placed before nvtracker, NvDCF reconstructs `NvDsObjectMeta` entries as it runs — silently dropping any tensor metadata attached earlier. The symptom is 0% embedding coverage in the probe even though the SGIE appears to run without errors.
 
-**`gie-unique-id` links pipeline elements**: every nvinfer has a unique integer ID. The SGIE declares `operate-on-gie-id=1` (the PGIE's ID) and the C++ code uses `kReidGieId=2` to find the correct tensor output when iterating `NvDsObjectMeta`. If these IDs don't match, you get no embeddings silently.
+**`output-tensor-meta=1` is required for embeddings**: by default, SGIE only writes classifier output into `NvDsClassifierMeta`. Setting `output-tensor-meta=1` additionally attaches the raw float buffer to `NvDsObjectMeta::tensor_output_list`, which lets the pad probe read the full 256-d embedding vector.
+
+**`network-type=100` (OTHER) for embedding models**: using `network-type=1` (classifier) causes nvinfer to interpret the model output as class logits and allocate `NvDsClassifierMeta` instead of raw tensor output. Embedding models must use `network-type=100`. With `output-tensor-meta=1` the raw tensor is available regardless, but `network-type=100` avoids nvinfer wasting memory on a spurious classifier path.
+
+**`gie-unique-id` links pipeline elements**: every nvinfer has a unique integer ID. The C++ code uses `kReidGieId=2` to find the correct tensor output when iterating `NvDsObjectMeta`. If these IDs don't match, you get no embeddings silently.
+
+**Do not set `operate-on-gie-id`**: after nvtracker runs, NvDCF changes `unique_component_id` on most tracked objects. If `operate-on-gie-id=1` is set in the SGIE config, only the small fraction of objects whose ID hasn't been overwritten will be processed — producing ~5% embedding coverage. Removing the field lets the SGIE process all class-0 objects unconditionally.
+
+**`secondary-reinfer-interval` GObject property**: this property (not in the `.txt` config file) defaults to `0`, meaning nvinfer infers each tracking ID exactly **once** in its lifetime. The result is that only the first frame a person appears carries an embedding — all subsequent frames are empty. Set it to `1` in C++ code after the element is created:
+```cpp
+g_object_set(sgie_, "secondary-reinfer-interval", (guint)1, nullptr);
+```
 
 ---
 
@@ -340,42 +386,73 @@ https://api.ngc.nvidia.com/v2/resources/<org>/<team>/<name>/versions
 
 ---
 
-### 5. OSNet — Architecture and Why It's Preferred for ReID
+### 5. ReID Model — ResNet50 and Phase 3 Implementation Findings
 
-OSNet (Omni-Scale Network, Zhou et al. ICCV 2019) is the dominant lightweight ReID backbone. Key architectural ideas:
+#### Active model: ResNet50 (Market-1501 + AI City Challenge 156)
 
-- **Omni-scale feature learning**: each layer aggregates features at multiple spatial scales (1×1, 3×3, 5×5, 7×7) via depthwise separable convolution branches, then fuses them with a learned gate.
-- **Unified aggregation gate (UAG)**: a channel-wise sigmoid gate controls how much each scale contributes, conditioned on the input feature map.
-- **Output**: a global average pooling + BN layer produces a 512-d L2-normalised feature vector.
+This project uses a ResNet50 backbone trained on combined Market-1501 and AI City Challenge datasets. It replaced OSNet x1.0 during Phase 3 development.
 
-OSNet-x1.0 input/output for this project:
-- Input: `(B, 3, 256, 128)` — standard Market-1501 crop size, RGB, normalised with `net-scale-factor=1/255`
-- Output: `(B, 512)` — embedding vector (cosine similarity used for identity matching)
-
-**Pretrained weights from torchreid**: the `torchreid` library (kaiyangzhou) provides pretrained OSNet checkpoints on Market-1501, DukeMTMC, and others. The `pretrained=True` flag in `osnet_x1_0()` downloads from Google Drive via `gdown`. Market-1501 fine-tuned weights produce ~94% Rank-1 accuracy on the Market-1501 benchmark.
-
-**What this project currently uses**: `scripts/export_reid_onnx.py` loads the **ImageNet backbone** (`pretrained=True`, torchreid key `'osnet_x1_0'`). See the finding below for why.
-
-**Finding: softmax-only Market-1501 training causes embedding collapse**
-
-We evaluated the publicly available torchreid Market-1501 checkpoint (GDrive `1vduhq5DpN2q1g4fYEZfPI17MJeh9qyrA`) and found it unsuitable for distance-based matching:
-
-| Metric | ImageNet backbone | Market-1501 softmax ckpt |
+| Property | ResNet50 (current) | OSNet x1.0 (replaced) |
 |---|---|---|
-| Embedding norm (unit expected) | ~27 (raw) → 1.0 after L2-wrap | ~25 (raw) → 1.0 after L2-wrap |
-| Mean pairwise cosine sim (random pairs) | **0.741** | **0.956** |
-| Std of pairwise cosine sim | 0.084 | 0.008 |
-| BN neck `fc.1.running_var` | normal | ~0.0001 (collapsed) |
+| Input | `3×256×128`, RGB | `3×256×128`, RGB |
+| Output dim | 256 | 512 |
+| Engine size | ~47 MB FP16 | ~5 MB FP16 |
+| Inference time (Orin NX) | ~11 ms/batch-8 | ~22 ms/batch-8 |
+| Inter-ID mean cosine sim | ~0.42 | N/A (collapsed, see below) |
 
-Root cause: the checkpoint was trained with **softmax cross-entropy only** (no metric loss). Softmax optimises classification accuracy without constraining the geometry of the embedding space. The BatchNorm neck collapses (`running_var ≈ 0.0001`), causing all inputs — including random noise — to land in a tiny angular cluster. Pairwise cosine similarity of 0.956 on random inputs means the embeddings carry almost no identity information for retrieval.
+ResNet50 is faster on Jetson because TensorRT can fuse standard 3×3 convolutions into efficient kernels. OSNet's omni-scale blocks (parallel depthwise branches with learned gates) don't benefit from the same fusion, resulting in higher latency despite a smaller model file.
 
-The ImageNet backbone, despite having no ReID-specific training, produces a much better-spread embedding space (mean 0.741, std 0.084) and is the more useful baseline until a metric-loss trained model is available.
+#### Normalization — the most common silent failure
 
-**Diagnostic tool**: `messaging/zmq/reid_probe.py` measures these statistics live from the ZMQ stream without modifying any pipeline state. Run it while the pipeline is streaming to check embedding health:
+The ResNet50 ONNX model has **no preprocessing baked in** (the first op is a Conv layer). Without explicit normalization in the nvinfer config, all embeddings collapse and inter-ID cosine similarity is ~0.875 — indistinguishable from random noise.
+
+Required normalization (ImageNet statistics):
+```ini
+net-scale-factor=0.017352607709750568   # ≈ 1 / (255 * 0.226)
+offsets=123.675;116.28;103.53           # ImageNet mean (R;G;B)
+```
+
+Impact on embedding discrimination:
+
+| Config | Inter-ID mean cosine sim | Gap (intra−inter) | Verdict |
+|---|---|---|---|
+| `net-scale-factor=0.00392` (1/255 only) | 0.875 | 0.062 | ✗ Collapsed — unusable |
+| + `offsets` + correct scale | 0.42 | 0.363 | ✓ Discriminative |
+
+#### Diagnostic workflow with `reid_probe.py`
+
+Run while the pipeline is streaming to check embedding health without modifying any pipeline state:
+
 ```bash
 python3 messaging/zmq/reid_probe.py --frames 500
 ```
-Key output to watch: norm statistics (should be 1.0 if L2-norm is baked in), mean pairwise cosine sim (should be <0.5 for a well-discriminating model), and fraction of pairs above the matcher threshold (should be low for different-identity pairs).
+
+Key metrics to watch:
+- **Coverage**: should be **100%** — every person detection carries an embedding. If low (<50%), check `secondary-reinfer-interval` and `operate-on-gie-id` (see §1 above)
+- **Norm**: should be **1.0** — ResNet50's `fc_pred` output is BN-normalised
+- **Intra-ID mean**: cosine similarity of same person across frames — should be **> 0.70**
+- **Inter-ID mean**: cosine similarity across different identities — should be **< 0.55**
+- **Gap (intra−inter)**: should be **≥ 0.30** for reliable matching
+
+#### Cross-camera global ID and OSD color coding
+
+The C++ pad probe (`on_buffer_probe` in `pipeline.cpp`) maintains a cross-camera gallery in memory:
+
+1. Each `(source_id, tracking_id)` pair is looked up in `reid_gallery_`
+2. On first appearance, the embedding is compared (cosine similarity) against all entries from **other** cameras
+3. If similarity ≥ threshold: the new track inherits the matching global ID
+4. If no match: a new global ID is assigned (`next_global_id_++`)
+5. The assignment is stored in `track_global_` and frozen — the track keeps the same ID for its lifetime (no flickering even as embeddings update)
+
+OSD rendering: `global_id % 8` selects from an 8-color palette. The label `ID:N tid:M` shows both the stable cross-camera global ID and the per-camera NvDCF tracking ID.
+
+The screenshot below shows the system working — the same physical person in both camera tiles has the same `ID:N` label and bounding box color:
+
+> Two-camera tiled OSD view: orange box "ID:35 tid:35" on cam0, matching yellow box on cam1 — same global ID, different per-camera TID. A third person (blue, "ID:28") appears on cam0 only.
+
+#### OSNet evaluation (why it was replaced)
+
+OSNet x1.0 from torchreid was evaluated first. The publicly available Market-1501 softmax checkpoint (`GDrive 1vduhq5DpN2q1g4fYEZfPI17MJeh9qyrA`) was found unsuitable for distance-based matching: the BatchNorm neck had `running_var ≈ 0.0001` (collapsed), causing mean pairwise cosine similarity of 0.956 on random identity pairs. Even the ImageNet backbone (no ReID training) produced a better-spread space (mean 0.741, std 0.084). The ResNet50 model with metric-loss training resolved this definitively.
 
 ---
 
@@ -498,34 +575,22 @@ The trade-off: if the consumer crashes and restarts, it misses events during dow
 
 ## Future Improvements
 
-### ReID — Upgrade to Metric-Loss Trained Weights
+### ReID — Fine-tuning for Higher Accuracy
 
-The biggest accuracy gain available with zero pipeline changes is replacing the ImageNet backbone with a model trained using **metric loss** (triplet, ArcFace, or contrastive). Softmax-only training collapses the embedding space; metric-loss training explicitly pushes different-identity embeddings apart and same-identity embeddings together.
+The current ResNet50 checkpoint (Market-1501 + AI City 156) produces an inter-ID vs intra-ID gap of ~0.36, which is functional for multi-camera matching but leaves room for improvement. Options:
 
-**Option 1 — FastReID (JDAI-CV)**
+**Option 1 — FastReID fine-tune on domain-specific data**
 
-[FastReID](https://github.com/JDAI-CV/fast-reid) is the current state-of-the-art open-source ReID library. It provides:
-- OSNet-x1.0 trained with ArcFace loss on Market-1501 (expected: same-person cosine sim >0.85, different-person <0.40)
-- Plug-and-play ONNX export compatible with this project's `infer-dims=3;256;128` and `output-tensor-meta=1` config
-- Export command: `python tools/deploy/onnx_export.py --config-file configs/Market1501/osnet_ibn.yml MODEL.WEIGHTS path/to/model.pth`
+[FastReID](https://github.com/JDAI-CV/fast-reid) provides a training framework and ONNX export compatible with this project's `infer-dims=3;256;128` and `output-tensor-meta=1` config. Fine-tuning on footage from the actual deployment cameras would improve recall at the current threshold.
 
-**Option 2 — Strong-ReID Baseline (Luo et al.)**
+**Option 2 — Track-level gallery instead of per-frame updates**
 
-The ["bag of tricks"](https://github.com/michuanhaohao/reid-strong-baseline) baseline trains ResNet-50 with triplet + softmax (ID loss). Pre-trained Market-1501 weights are available. OSNet-compatible alternative is available via [torchreid with triplet loss](https://kaiyangzhou.github.io/deep-person-reid/datasets.html).
-
-**Option 3 — Torchreid with Metric Loss**
-
-Torchreid supports `loss='triplet'` training mode. A Market-1501 OSNet-x1.0 checkpoint trained with triplet+softmax is available from the torchreid model zoo:
-```python
-# In torchreid (if torchvision conflict is resolved):
-model = torchreid.models.build_model('osnet_x1_0', num_classes=751, loss='triplet')
-torchreid.utils.load_pretrained_weights(model, 'osnet_x1_0_market_256x128_amsgrad_ep150_...')
-```
+Currently the gallery stores the **latest** embedding per track. Averaging embeddings over the first N confident frames (e.g., high detector confidence, large bbox area) would produce a more stable representative and reduce noise from partial occlusions.
 
 **How to evaluate a new checkpoint before deploying**: run `reid_probe.py` and check:
-- Mean pairwise cosine sim among random pairs should drop to **<0.45**
-- Std should rise to **>0.15** (embedding space is spread out)
-- BN neck `running_var` values should be in the normal range (0.01–1.0)
+- Coverage: **100%** (every detection has an embedding)
+- Inter-ID mean cosine sim: **< 0.50**
+- Gap (intra−inter): **≥ 0.30**
 
 ### Cross-Camera Matching — Algorithmic Improvements
 
@@ -538,18 +603,17 @@ torchreid.utils.load_pretrained_weights(model, 'osnet_x1_0_market_256x128_amsgra
 
 ### Pipeline — OSD Improvements
 
-The current OSD branch draws standard DeepStream bboxes and tracking IDs. Possible extensions:
-- **ReID match overlay**: when `reid_matcher.py` fires a `reid_match` event, feed it back to the C++ pipeline (e.g. via a ZMQ reverse channel) to draw a coloured border or label linking matched persons across cameras
-- **Confidence display**: show ReID similarity score alongside the tracking ID to make match quality visible during debugging
-- **Per-class colour coding**: colour bboxes by class (green=person, yellow=bag) via `NvDsObjectMeta.rect_params.border_color`
+The current OSD draws global-ID-colored bboxes with `ID:N tid:M` labels. Possible extensions:
+- **Confidence display**: show the ReID gallery match similarity score alongside the global ID label
+- **Zone overlay**: draw configured zone polygons on the OSD frame for loitering detection debugging (Phase 4)
 
 ### Tracker — Re-enable Visual ReID for Stable IDs
 
-With `visualTrackerType=0`, ID stability degrades when persons are briefly occluded or change direction. The correct production upgrade is to re-enable NvDCF visual tracking with the OSNet embedding as the appearance descriptor, letting the tracker itself use appearance similarity during association:
+With `visualTrackerType=0`, ID stability degrades when persons are briefly occluded or change direction. The correct production upgrade is to re-enable NvDCF visual tracking with the ResNet50 embedding as the appearance descriptor, letting the tracker use appearance similarity during association:
 
 1. Set `visualTrackerType=1` and `matchingScoreWeight4VisualSimilarity > 0` in `config_tracker_NvDCF.yml`
-2. Resolve the NVMM surface pinning race by ensuring `nvdsosd` maps buffers after the tracker releases them (use `process-mode=0` CPU rendering, which was already set)
-3. Tune `minMatchingScore4VisualSimilarity` on real footage — with an ImageNet backbone, this threshold needs to be lower than with a metric-loss model
+2. Resolve the NVMM surface pinning race between nvtracker and downstream elements (use `process-mode=0` CPU rendering for nvdsosd, which is already set)
+3. Tune `minMatchingScore4VisualSimilarity` on real footage
 
 ---
 
@@ -561,11 +625,11 @@ Quick reference linking each SDK concept to where it appears in this codebase.
 |---|---|---|
 | **DeepStream pipeline** | `pipeline.cpp` | GStreamer element graph; PGIE→tracker→SGIE order; pad probes vs appsink |
 | **TensorRT engine build** | First pipeline run | ONNX→TRT compilation; precision (INT8/FP16); engine non-portability; layer fusion |
-| **SGIE / object-level inference** | ReID nvinfer config | `process-mode=2`; automatic crop routing; `operate-on-gie-id` linkage |
+| **SGIE / object-level inference** | ReID nvinfer config | `process-mode=2`; automatic crop routing; do NOT set `operate-on-gie-id`; `secondary-reinfer-interval=1` GObject property |
 | **TAO Toolkit** | `download_reid.sh` | ETLT format; tao-converter; key-based decryption; TAO vs open-source ONNX |
 | **NGC CLI** | Model download scripts | Registry vs resource; version discovery via REST API; guest-downloadable resources |
 | **NvDCF tracker** | Tracker config | Correlation filter; NVMM surface pinning; probation/shadow age |
-| **ReID pipeline** | Phase 3 | Embedding extraction; cosine similarity; cross-camera gallery matching |
+| **ReID pipeline** | Phase 3 | ResNet50 SGIE; 256-dim embeddings; ImageNet normalization; `secondary-reinfer-interval`; cross-camera gallery; global ID color coding |
 | **Jetson platform** | Hardware target | NVMM zero-copy; CUDA unified memory; DLA; power modes (`nvpmodel`, `jetson_clocks`) |
 | **ONNX export** | `export_reid_onnx.py` | Dynamic axes; opset version; `eval()` vs `train()` branch tracing |
 | **ZeroMQ** | `publisher.cpp` | PUB/SUB; HWM; DONTWAIT drop semantics; vs Kafka durability |
