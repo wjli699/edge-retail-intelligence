@@ -62,6 +62,18 @@ pip3 install -r requirements.txt
 python3 consumer.py --endpoint tcp://localhost:5555 --filter person
 ```
 
+**Terminal 2 (alt) — Cross-camera ReID matcher:**
+```bash
+cd messaging/zmq
+python3 reid_matcher.py --endpoint tcp://localhost:5555 --threshold 0.75
+```
+
+**Diagnostic — ReID embedding quality probe:**
+```bash
+cd messaging/zmq
+python3 reid_probe.py --endpoint tcp://localhost:5555 --frames 500
+```
+
 For local debugging without ZMQ, switch `output.mode: stdout` in `configs/default.yaml`.
 
 ## Development Status (Phased Roadmap)
@@ -70,7 +82,7 @@ For local debugging without ZMQ, switch `output.mode: stdout` in `configs/defaul
 |-------|------|--------|
 | 1 | C++ DeepStream pipeline — PeopleNet detection, NvDCF tracking, pad_probe JSON output | **complete** |
 | 2 | ZeroMQ PUB/SUB messaging — C++ publisher + Python consumer | **complete** |
-| 3 | ReID + multi-camera correlation | not started |
+| 3 | ReID + multi-camera correlation | **complete** |
 | 4 | Loitering detection engine (zones, dwell time) | not started |
 | 5 | FastAPI control plane | not started |
 | 6 | Production readiness (Docker, logging, metrics) | not started |
@@ -89,6 +101,13 @@ All core engine code lives under `edge::retail::core`.
 | `Publisher` | `src/publisher.cpp` | ZeroMQ PUB socket wrapper; called from the `EventCallback` |
 | `FrameEvent` / `Detection` | `src/metadata.cpp` | Data types + compact JSON serializer |
 
+### Phase 3 — ReID components (`messaging/zmq/`)
+
+| Script | Role |
+|--------|------|
+| `reid_matcher.py` | Cross-camera matching service: subscribes to ZMQ, maintains per-camera embedding gallery (TTL-evicted), emits `reid_identity` (new person) and `reid_link` (cross-camera match) JSON events once per identity — no per-frame flooding |
+| `reid_probe.py` | Diagnostic tool: collects N frames, reports embedding presence rate, norm stats, and intra-ID vs inter-ID pairwise cosine similarity distribution to assess model quality |
+
 ### Output modes (`output.mode` in `default.yaml`)
 
 | Mode | Behaviour |
@@ -102,15 +121,28 @@ All core engine code lives under `edge::retail::core`.
 ```
 nvurisrcbin(s)
   --[pad-added:vsrc_0]--> nvstreammux.sink_0
-nvstreammux --> nvinfer(PeopleNet) --> nvtracker(NvDCF) --> nvdsosd --> fakesink
-                                             ^
-                                       GST_PAD_PROBE_TYPE_BUFFER
-                                       on_buffer_probe → EventCallback → Publisher.send()
+nvstreammux --> nvinfer(PeopleNet) --> nvtracker(NvDCF) --> nvinfer(ReID SGIE) --> [OSD chain] --> sink
+                                                                    ^
+                                                      GST_PAD_PROBE_TYPE_BUFFER
+                                                      on_buffer_probe (SGIE src pad)
+                                                                    ↓
+                                                      cross-camera gallery lookup → global_id assignment
+                                                                    ↓
+                                                      EventCallback → Publisher.send()
 ```
 
+**Critical ordering**: SGIE must come **after** nvtracker. NvDCF reconstructs `NvDsObjectMeta` entries as it runs, which silently drops any SGIE tensor metadata attached before tracking. The probe sits on the **SGIE src pad** (falls back to tracker src pad when SGIE is disabled) so embeddings are always available when the probe fires.
+
 - `nvurisrcbin` emits dynamic `vsrc_%u` pads; `on_pad_added` requests `sink_%u` from nvstreammux (GStreamer 1.16 API: `gst_element_get_request_pad`).
-- The pad probe sits on the **nvtracker src pad** so every event carries a stable `tracking_id` (`UNTRACKED_OBJECT_ID = 0xFFFF…FFFF` means tracker hasn't assigned one yet).
 - ZMQ `send()` uses `ZMQ_DONTWAIT` — frames are dropped (not blocked) if no consumer is connected or HWM is hit.
+
+**OSD chain** (`osd_file` / `osd_display` set in config):
+```
+... SGIE src → nvmultistreamtiler → nvdsosd → [tee]
+                                                 ├─ queue → nvvideoconvert → nvv4l2h264enc → h264parse → matroskamux → filesink (osd_file)
+                                                 └─ queue → nvvideoconvert → [caps:video/x-raw,format=RGBA] → nveglglessink (osd_display)
+```
+The CPU caps (`video/x-raw, format=RGBA`, no `memory:NVMM`) on the display branch are required — `nveglglessink` cannot handle NVMM surface arrays and crashes without them.
 
 ### Config files
 
@@ -119,13 +151,52 @@ nvstreammux --> nvinfer(PeopleNet) --> nvtracker(NvDCF) --> nvdsosd --> fakesink
 | `configs/default.yaml` | Top-level: sources, model paths, output mode + ZMQ endpoint |
 | `configs/config_infer_primary_peoplenet.txt` | nvinfer config for PeopleNet ONNX; paths relative to this file's directory |
 | `configs/config_tracker_NvDCF.yml` | NvDCF tracker parameters for `libnvds_nvmultiobjecttracker.so` |
+| `configs/config_infer_secondary_reid.txt` | SGIE config for ReID model (process-mode=2, operates on person crops from primary GIE) |
 | `configs/peoplenet_labels.txt` | Class labels: person(0), bag(1), face(2) |
 | `models/peoplenet/` | ONNX + TRT engine (gitignored — large binaries) |
+| `models/reid/` | ReID ONNX + TRT engines (gitignored — large binaries) |
 
 ### JSONL event format
-One object per frame with ≥1 detection:
+
+Frame event (one per frame with ≥1 detection), published by C++ pipeline:
 ```json
 {"event":"frame","ts_ms":1713000000000,"source_id":0,"frame":42,
  "detections":[{"class":0,"label":"person","conf":0.85,
-                "bbox":{"l":100.0,"t":50.0,"w":80.0,"h":200.0},"tid":3}]}
+                "bbox":{"l":100.0,"t":50.0,"w":80.0,"h":200.0},"tid":3,
+                "emb":"<base64-encoded float32 array>"}]}
 ```
+
+ReID events (emitted by `reid_matcher.py`, once per identity — no per-frame flooding):
+```json
+{"event":"reid_identity","ts_ms":1713000000000,"global_id":5,"source_id":0,"tid":3}
+{"event":"reid_link","ts_ms":1713000000000,"global_id":5,
+ "cam_a":{"source_id":0,"tid":3},"cam_b":{"source_id":1,"tid":7},"similarity":0.912}
+```
+
+### ReID model
+
+Active model: **ResNet50 (Market-1501 + AI City Challenge 156)**
+- SGIE: `configs/config_infer_secondary_reid.txt`, `gie-unique-id=2`
+- Input: `3×256×128` (RGB person crop), batch up to 8
+- Output: 256-dim BN-normalised embedding (`fc_pred` layer), read dynamically from `NvDsInferTensorMeta`
+- Engine: `models/reid/resnet50_market1501_aicity156.onnx_b8_gpu0_fp16.engine` (~47 MB, FP16, ~11ms/batch)
+- Replaced OSNet x1.0 (512-dim, ~5 MB engine, ~22ms/batch) — ResNet50 is both more accurate and faster on Jetson due to better TRT kernel fusion of standard convolutions vs OSNet's omni-scale blocks
+
+**Phase 3 implementation fixes** — hard-won during development:
+
+| Fix | Root cause | Resolution |
+|-----|-----------|------------|
+| ~5% embedding coverage | `secondary-reinfer-interval` GObject property defaults to 0 (infer each TID exactly once in its lifetime) | `g_object_set(sgie_, "secondary-reinfer-interval", (guint)1, nullptr)` in `pipeline.cpp` |
+| ~5% coverage even after interval fix | `operate-on-gie-id=1` in SGIE config — NvDCF changes `unique_component_id` on most objects after tracking, so they no longer match the PGIE ID | Remove `operate-on-gie-id` from `config_infer_secondary_reid.txt` entirely |
+| All inter-ID cosine similarity ≈ 0.875 (no discrimination) | Missing ImageNet normalization — the ONNX model has no preprocessing baked in | Add `offsets=123.675;116.28;103.53` and `net-scale-factor=0.017352607709750568` to SGIE config |
+| SGIE tensor metadata silently dropped | SGIE was placed before nvtracker; NvDCF reconstructs `NvDsObjectMeta` and overwrites user metadata | Reorder pipeline: `pgie → tracker → sgie`; move pad probe to SGIE src pad |
+
+**Verifying embedding health** — run `reid_probe.py` while streaming:
+- Coverage should be **100%** (every person detection carries an embedding)
+- Inter-ID mean cosine sim should be **< 0.55**, intra-ID mean **> 0.70**
+- Gap (intra − inter) **≥ 0.30** → embeddings are discriminative
+
+**Cross-camera global ID assignment** (in `pipeline.cpp::on_buffer_probe`):
+- Each `(source_id, tracking_id)` pair is assigned a `global_id` on first encounter via cosine search of the cross-camera gallery
+- Once assigned, the global ID is frozen in `track_global_` for the track's lifetime — no flickering
+- OSD shows `ID:N` label + color-coded bbox (8-color palette, `global_id % 8`) so the same person appears in the same color on both camera tiles
