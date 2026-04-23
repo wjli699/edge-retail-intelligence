@@ -158,7 +158,7 @@ class Calibrator:
 
             if key in (ord('q'), 27):  # q or Esc
                 cv2.destroyAllWindows()
-                return None
+                return self.finished_zones if self.finished_zones else None
 
             elif key == ord('z'):  # undo last vertex
                 if self.current_poly:
@@ -166,21 +166,18 @@ class Calibrator:
                     self.closed = False
                     self._dirty = True
 
-            elif key == ord('n') or (key == ord('n') and self.closed):
-                self._finish_current_zone()
-
             elif key == ord('s'):
                 if self.current_poly and len(self.current_poly) >= 3:
                     self._finish_current_zone()
                 cv2.destroyAllWindows()
                 return self.finished_zones if self.finished_zones else None
 
-            # Auto-prompt to name after right-click close
-            if self.closed:
+            # Auto-prompt to name after right-click close or 'n'
+            if self.closed or key == ord('n'):
                 self._finish_current_zone()
 
         cv2.destroyAllWindows()
-        return None
+        return self.finished_zones if self.finished_zones else None
 
     def _finish_current_zone(self):
         if len(self.current_poly) < 3:
@@ -195,13 +192,17 @@ class Calibrator:
         dwell_input = input(f"Dwell threshold in seconds [{self.default_dwell}]: ").strip()
         dwell = float(dwell_input) if dwell_input else self.default_dwell
 
-        self.finished_zones.append({
+        zone = {
             "name":              name,
             "dwell_threshold_s": dwell,
             "polygon":           list(self.current_poly),
-        })
-        print(f"[calibrator] Zone '{name}' saved ({len(self.current_poly)} vertices).",
-              file=sys.stderr)
+        }
+        self.finished_zones.append(zone)
+
+        # Print the zone immediately — output is not lost if the user Ctrl+C's later
+        print(f"\n# Zone saved — add to zones.yaml under source_id: {self.source_id}")
+        _print_zone_yaml(zone)
+        print(f"# ({len(self.finished_zones)} zone(s) defined so far — right-click another polygon or press 'q'/'s' to finish)\n")
 
         self.current_poly = []
         self.closed = False
@@ -212,16 +213,20 @@ class Calibrator:
 # YAML output
 # ---------------------------------------------------------------------------
 
+def _print_zone_yaml(zone: dict, indent: str = "      ") -> None:
+    print(f"{indent}- name: \"{zone['name']}\"")
+    print(f"{indent}  dwell_threshold_s: {zone['dwell_threshold_s']}")
+    print(f"{indent}  polygon:")
+    for pt in zone["polygon"]:
+        print(f"{indent}    - [{pt[0]}, {pt[1]}]")
+
+
 def print_yaml(source_id: int, zones: List[dict]) -> None:
-    print("\n# Paste this into zones.yaml under 'cameras:'")
+    print("\n# Full zones.yaml snippet for this camera:")
     print(f"  - source_id: {source_id}")
     print(f"    zones:")
     for zone in zones:
-        print(f"      - name: \"{zone['name']}\"")
-        print(f"        dwell_threshold_s: {zone['dwell_threshold_s']}")
-        print(f"        polygon:")
-        for pt in zone["polygon"]:
-            print(f"          - [{pt[0]}, {pt[1]}]")
+        _print_zone_yaml(zone)
 
 
 # ---------------------------------------------------------------------------
