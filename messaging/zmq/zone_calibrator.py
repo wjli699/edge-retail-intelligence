@@ -252,14 +252,50 @@ def grab_rtsp_frame(url: str, save_path: Optional[str] = None) -> np.ndarray:
     return frame
 
 
+def save_zones(zones_path: str, source_id: int, new_zones: List[dict]) -> None:
+    """Merge new_zones into zones_path for source_id, replacing any existing entry."""
+    path = Path(zones_path)
+
+    if path.exists():
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+    else:
+        cfg = {}
+
+    cameras: List[dict] = cfg.get("cameras", [])
+
+    # Remove existing entry for this source_id, insert updated one
+    cameras = [c for c in cameras if int(c.get("source_id", -1)) != source_id]
+    cameras.append({
+        "source_id": source_id,
+        "zones": [
+            {
+                "name":              z["name"],
+                "dwell_threshold_s": z["dwell_threshold_s"],
+                "polygon":           z["polygon"],
+            }
+            for z in new_zones
+        ],
+    })
+    cameras.sort(key=lambda c: c["source_id"])
+    cfg["cameras"] = cameras
+
+    with open(path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    print(f"[calibrator] Saved {len(new_zones)} zone(s) for source_id={source_id} to {path}",
+          file=sys.stderr)
+
+
 def main():
     p = argparse.ArgumentParser(description="Interactive zone polygon calibrator")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--image", help="Path to a camera screenshot (JPEG/PNG)")
     src.add_argument("--rtsp",  help="RTSP URL to grab one frame from")
-    p.add_argument("--source-id",  type=int,   required=True,        help="Camera source_id (0-based)")
-    p.add_argument("--dwell",      type=float, default=30.0,         help="Default dwell threshold (seconds)")
-    p.add_argument("--save-frame", metavar="PATH", default=None,     help="Save grabbed RTSP frame to this path and exit (no GUI)")
+    p.add_argument("--source-id",  type=int,   required=True,           help="Camera source_id (0-based)")
+    p.add_argument("--dwell",      type=float, default=30.0,            help="Default dwell threshold (seconds)")
+    p.add_argument("--zones",      default="zones.yaml",                help="zones.yaml to update (default: zones.yaml)")
+    p.add_argument("--save-frame", metavar="PATH", default=None,        help="Save grabbed RTSP frame to this path and exit (no GUI)")
     args = p.parse_args()
 
     if args.image:
@@ -279,11 +315,12 @@ def main():
     cal = Calibrator(frame, source_id=args.source_id, default_dwell=args.dwell)
     zones = cal.run()
 
-    if zones:
-        print_yaml(args.source_id, zones)
-    else:
+    if not zones:
         print("No zones saved.", file=sys.stderr)
         sys.exit(1)
+
+    save_zones(args.zones, args.source_id, zones)
+    print_yaml(args.source_id, zones)
 
 
 if __name__ == "__main__":
