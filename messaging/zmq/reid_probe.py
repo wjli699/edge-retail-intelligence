@@ -122,29 +122,46 @@ def main():
 
     print()
     print("=" * 60)
-    print("PAIRWISE COSINE SIMILARITY  (same-camera, random 200-pair sample)")
+    print("PAIRWISE COSINE SIMILARITY")
     print("=" * 60)
     # Normalise all embeddings
-    embs = np.stack([e for _, _, e in embeddings])
-    embs = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8)
+    embs_arr = np.stack([e for _, _, e in embeddings])
+    embs_arr = embs_arr / (np.linalg.norm(embs_arr, axis=1, keepdims=True) + 1e-8)
+    keys = [(s, t) for s, t, _ in embeddings]
 
+    # Split pairs into intra-ID (same source+tid) and inter-ID (different tid)
     rng = np.random.default_rng(0)
-    n = len(embs)
-    pairs = min(200, n * (n - 1) // 2)
-    sims = []
-    for _ in range(pairs):
-        i, j = rng.choice(n, size=2, replace=False)
-        sims.append(float(embs[i] @ embs[j]))
+    n = len(embs_arr)
+    all_idx_pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    rng.shuffle(all_idx_pairs)
 
-    sims = np.array(sims)
-    print(f"  Sampled {len(sims)} pairs from {n} embeddings")
-    print(f"  min={sims.min():.3f}  max={sims.max():.3f}  "
-          f"mean={sims.mean():.3f}  std={sims.std():.3f}")
+    intra, inter = [], []
+    for i, j in all_idx_pairs:
+        sim = float(embs_arr[i] @ embs_arr[j])
+        if keys[i] == keys[j]:      # same camera + same tracking ID
+            intra.append(sim)
+        else:
+            inter.append(sim)
+        if len(intra) >= 200 and len(inter) >= 200:
+            break
 
+    def _stats(label, sims):
+        if not sims:
+            print(f"  {label}: no pairs")
+            return
+        a = np.array(sims)
+        print(f"  {label} ({len(a)} pairs):")
+        print(f"    min={a.min():.3f}  max={a.max():.3f}  mean={a.mean():.3f}  std={a.std():.3f}")
+
+    _stats("Intra-ID (same person, stability check)", intra)
+    _stats("Inter-ID (different persons, discrimination)", inter)
+
+    # Threshold breakdown on all sampled pairs combined
+    all_sims = np.array(intra + inter)
+    print(f"\n  Threshold breakdown (all {len(all_sims)} sampled pairs):")
     thresholds = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
-    print(f"\n  Fraction of pairs above threshold:")
     for t in thresholds:
-        frac = (sims >= t).mean()
+        frac = (all_sims >= t).mean()
         bar = "█" * int(frac * 40)
         print(f"    ≥{t:.2f}  {frac:5.1%}  {bar}")
 
@@ -152,19 +169,28 @@ def main():
     print("=" * 60)
     print("INTERPRETATION")
     print("=" * 60)
-    mean_sim = sims.mean()
-    if mean_sim > 0.70:
-        print(f"  Mean similarity {mean_sim:.3f} is HIGH.")
-        print("  ImageNet backbone collapses person crops into a narrow region.")
-        print("  → Use Market-1501 fine-tuned OSNet weights (see README §5).")
-        print("  → With proper weights, same-identity pairs → ~0.85+, different → ~0.30.")
-    elif mean_sim < 0.30:
-        print(f"  Mean similarity {mean_sim:.3f} is LOW — embeddings are well-spread.")
-        print("  This is consistent with a model that discriminates identities.")
-        print("  If matches=0, the threshold may be too high, or sources=1.")
+    if intra and inter:
+        intra_mean = np.mean(intra)
+        inter_mean = np.mean(inter)
+        gap = intra_mean - inter_mean
+        print(f"  Intra-ID mean : {intra_mean:.3f}  (want > 0.80)")
+        print(f"  Inter-ID mean : {inter_mean:.3f}  (want < 0.50)")
+        print(f"  Discriminative gap : {gap:.3f}  (want > 0.30)")
+        if gap >= 0.30 and inter_mean < 0.60:
+            print("  ✓ Embeddings are discriminative — model looks good.")
+            print("  → For cross-camera matching, threshold 0.65–0.75 is a good starting point.")
+        elif gap >= 0.15:
+            print("  ~ Moderate discrimination. Matches may work but expect some false positives.")
+            print("  → Lower threshold to 0.60–0.65 and check precision.")
+        else:
+            print("  ✗ Poor discrimination — intra/inter gap too small.")
+            print("  → The model collapses identities into a narrow region.")
+            print("  → Consider a different checkpoint or verify SGIE crops are correct size.")
+    elif inter:
+        print(f"  Only inter-ID pairs available. Mean={np.mean(inter):.3f}")
+        print("  Cannot assess intra-ID stability without multiple embeddings per TID.")
     else:
-        print(f"  Mean similarity {mean_sim:.3f} — moderate spread.")
-        print("  Consider downloading Market-1501 fine-tuned weights for better discrimination.")
+        print("  Only intra-ID pairs found — need more unique tracking IDs for discrimination test.")
 
 
 if __name__ == "__main__":

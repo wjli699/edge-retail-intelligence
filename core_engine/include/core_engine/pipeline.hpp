@@ -5,7 +5,9 @@
 #include <gst/gst.h>
 
 #include <functional>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace edge::retail::core {
@@ -44,18 +46,42 @@ class Pipeline {
   GstElement* sgie_{nullptr};    // nvinfer secondary — ReID embeddings (optional)
   GstElement* tracker_{nullptr}; // nvtracker — NvDCF
   GstElement* sink_{nullptr};    // fakesink (headless) OR filesink (osd mode)
-  // OSD chain — all null when osd_file is not set
-  GstElement* tiler_{nullptr};       // nvmultistreamtiler (N surfaces → 1 tiled frame)
-  GstElement* osd_{nullptr};         // nvdsosd
-  GstElement* videoconv_{nullptr};   // nvvideoconvert (RGBA NVMM → NV12 NVMM)
-  GstElement* encoder_{nullptr};     // nvv4l2h264enc (Jetson HW encoder)
-  GstElement* h264parse_{nullptr};   // h264parse (matroskamux needs parsed stream)
-  GstElement* muxer_{nullptr};       // matroskamux (MKV container)
+  // OSD chain — present whenever osd_file or osd_display is set
+  GstElement* tiler_{nullptr};        // nvmultistreamtiler (N surfaces → 1 tiled frame)
+  GstElement* osd_{nullptr};          // nvdsosd
+  // File-recording branch (osd_file set)
+  GstElement* videoconv_{nullptr};    // nvvideoconvert (RGBA NVMM → NV12 NVMM for encoder)
+  GstElement* encoder_{nullptr};      // nvv4l2h264enc (Jetson HW encoder)
+  GstElement* h264parse_{nullptr};    // h264parse (matroskamux needs parsed stream)
+  GstElement* muxer_{nullptr};        // matroskamux (MKV container)
+  // Live-display branch (osd_display set)
+  GstElement* videoconv_disp_{nullptr}; // nvvideoconvert before display sink
+  GstElement* display_sink_{nullptr};   // nveglglessink (live preview window)
+  // Tee + queues — only when BOTH file and display are active
+  GstElement* tee_{nullptr};
+  GstElement* queue_file_{nullptr};
+  GstElement* queue_disp_{nullptr};
 
   GMainLoop* loop_{nullptr};
 
   // Per-source callback data; owned by Pipeline, freed in teardown()
   std::vector<SourceBinData*> source_bin_data_;
+
+  // ── Cross-camera ReID gallery ──────────────────────────────────────────────
+  // Assigns a stable global identity ID to each physical person across cameras.
+  // Once a (source_id, tracking_id) pair is matched to a global ID it keeps
+  // that ID for its lifetime, so the label on screen never flickers.
+  struct GalleryEntry {
+    std::vector<float> emb;  // L2-normalised embedding (latest frame)
+    int   global_id;
+    double ts;               // std::chrono::steady_clock seconds
+  };
+
+  // key = "src:tid"
+  std::unordered_map<std::string, int>          track_global_;   // stable assignment
+  std::unordered_map<std::string, GalleryEntry> reid_gallery_;   // embedding store
+  int   next_global_id_{0};
+  std::mutex reid_mutex_;
 };
 
 }  // namespace edge::retail::core

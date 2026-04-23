@@ -18,3 +18,4 @@ output:
   # mode: file
   # file: /tmp/edge_retail_events.jsonl
   osd_file: "/tmp/reid_annotated.mkv"   # remove line to disable OSD recording
+  osd_display: true                     # set false to disable the live preview window

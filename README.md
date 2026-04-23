@@ -48,7 +48,7 @@ Target hardware: **NVIDIA Jetson Orin NX** — JetPack 5.x (L4T R35), CUDA 11.4,
 | 1 | C++ DeepStream pipeline — detection, tracking, JSONL output | **Done** |
 | 2 | ZeroMQ / Kafka messaging | **Done** |
 | 3 | ReID embedding extraction + cross-camera correlation | **Done** |
-| 4 | Loitering detection engine (zones, dwell-time thresholds) | Planned |
+| 4 | Loitering detection engine (zones, dwell-time thresholds) | **Done** |
 | 5 | FastAPI control plane | Planned |
 | 6 | Production hardening — Docker, metrics, storage, UI | Planned |
 
@@ -109,6 +109,15 @@ python3 reid_matcher.py --endpoint tcp://localhost:5555 --threshold 0.75
 # Terminal 3 (optional) — embedding quality diagnostic
 python3 reid_probe.py --endpoint tcp://localhost:5555 --frames 500
 # Coverage should be 100%, inter-ID cosine sim mean < 0.55, gap >= 0.30
+
+# Terminal 3 (alt) — loitering detection
+python3 loitering_detector.py --zones zones.yaml --endpoint tcp://localhost:5555
+# Prints loitering_alert JSON to stdout; active dweller table to stderr every 30s
+
+# Zone setup (one-time, run once per camera):
+python3 zone_calibrator.py --image /tmp/frame.png --source-id 0 --dwell 30
+# or grab directly from RTSP:
+python3 zone_calibrator.py --rtsp rtsp://192.168.9.146:18554/stream1 --source-id 0
 ```
 
 On first run, nvinfer auto-builds TRT engines from the ONNX files (~3–5 min each on Orin NX). Subsequent starts load the cached `.engine` files instantly.
@@ -173,6 +182,23 @@ One JSON object per frame with ≥1 detection:
 ```
 
 `global_id` is the stable cross-camera identity number. The same person seen on cameras 0 and 1 will share a `global_id` and appear with the same color in the OSD annotated video.
+
+### Loitering alert events (`loitering_detector.py` → stdout)
+
+Emitted when a person's centroid has been inside a configured zone longer than `dwell_threshold_s`. Repeats at most once per `--alert-cooldown` seconds (default 60) per person-zone pair:
+
+```json
+{"event":"loitering_alert","ts_ms":1713000000000,
+ "source_id":0,"tid":7,"zone":"entrance","dwell_s":47.2,
+ "bbox":{"l":312.0,"t":88.0,"w":96.0,"h":260.0}}
+```
+
+| Field | Description |
+|---|---|
+| `tid` | Per-camera NvDCF tracking ID — stable for the person's current visit |
+| `zone` | Zone name from `zones.yaml` |
+| `dwell_s` | Seconds the person has been inside the zone |
+| `bbox` | Current bounding box — use for face/person crop capture |
 
 ---
 
@@ -248,9 +274,12 @@ edge-retail-intelligence/
 │   ├── download_reid.sh      # Downloads NVIDIA TAO ETLT (reference only — TAO key is not public)
 │   └── export_reid_onnx.py   # Exports OSNet to ONNX (legacy — project now uses ResNet50)
 └── messaging/zmq/
-    ├── consumer.py           # Raw ZMQ subscriber — prints all frame events
-    ├── reid_matcher.py       # Cross-camera ReID matcher — emits reid_identity / reid_link events
-    └── reid_probe.py         # Embedding quality diagnostic — coverage, norm, cosine sim distribution
+    ├── consumer.py             # Raw ZMQ subscriber — prints all frame events
+    ├── reid_matcher.py         # Cross-camera ReID matcher — emits reid_identity / reid_link events
+    ├── reid_probe.py           # Embedding quality diagnostic — coverage, norm, cosine sim distribution
+    ├── loitering_detector.py   # Loitering detection — zone dwell tracking, emits loitering_alert
+    ├── zone_calibrator.py      # Interactive OpenCV zone polygon picker
+    └── zones.yaml              # Per-camera zone polygon config
 ```
 
 ---

@@ -83,7 +83,7 @@ For local debugging without ZMQ, switch `output.mode: stdout` in `configs/defaul
 | 1 | C++ DeepStream pipeline — PeopleNet detection, NvDCF tracking, pad_probe JSON output | **complete** |
 | 2 | ZeroMQ PUB/SUB messaging — C++ publisher + Python consumer | **complete** |
 | 3 | ReID + multi-camera correlation | **complete** |
-| 4 | Loitering detection engine (zones, dwell time) | not started |
+| 4 | Loitering detection engine (zones, dwell time) | **complete** |
 | 5 | FastAPI control plane | not started |
 | 6 | Production readiness (Docker, logging, metrics) | not started |
 
@@ -100,6 +100,31 @@ All core engine code lives under `edge::retail::core`.
 | `Pipeline` | `src/pipeline.cpp` | Builds and runs the GStreamer/DeepStream pipeline; owns the GMainLoop |
 | `Publisher` | `src/publisher.cpp` | ZeroMQ PUB socket wrapper; called from the `EventCallback` |
 | `FrameEvent` / `Detection` | `src/metadata.cpp` | Data types + compact JSON serializer |
+
+### Phase 4 — Loitering detection (`messaging/zmq/`)
+
+| File | Role |
+|------|------|
+| `zones.yaml` | Per-camera zone polygon config: polygon vertices (1920×1080 px), `dwell_threshold_s` |
+| `loitering_detector.py` | ZMQ subscriber: point-in-polygon dwell tracking keyed on `(source_id, tid)`, emits `loitering_alert` events; no ReID dependency |
+| `zone_calibrator.py` | Interactive OpenCV tool: click polygon vertices on a camera frame/screenshot, outputs `zones.yaml` snippet |
+
+Key design choices:
+- **No ReID**: loitering is a per-camera problem; `tid` is sufficient and `loitering_detector.py` works even with SGIE disabled
+- **Freeze-on-exit**: dwell timer resets when the centroid leaves the polygon; brief re-entry starts a fresh timer
+- **Stale track eviction**: tracks not seen for `--stale-ttl` seconds (default 5s) are removed; handles tracker drops without zone-exit events
+- **Alert cooldown**: `--alert-cooldown` (default 60s) prevents flooding repeated alerts for the same person+zone
+
+Run:
+```bash
+# Terminal — loitering detection (reads ZMQ frame events, prints alerts to stdout)
+cd messaging/zmq
+python3 loitering_detector.py --zones zones.yaml --endpoint tcp://localhost:5555
+
+# One-time zone setup — pick polygon vertices interactively
+python3 zone_calibrator.py --image /tmp/frame.png --source-id 0 --dwell 30
+python3 zone_calibrator.py --rtsp rtsp://192.168.9.146:18554/stream1 --source-id 0
+```
 
 ### Phase 3 — ReID components (`messaging/zmq/`)
 

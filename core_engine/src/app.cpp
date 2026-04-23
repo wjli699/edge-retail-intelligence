@@ -42,8 +42,9 @@ bool App::load_config() {
     if (auto out = root["output"]) {
       cfg_.output.mode     = out["mode"].as<std::string>("zmq");
       cfg_.output.endpoint = out["endpoint"].as<std::string>("tcp://*:5555");
-      if (out["file"])     cfg_.output.file_path = out["file"].as<std::string>();
-      if (out["osd_file"]) cfg_.output.osd_file  = out["osd_file"].as<std::string>();
+      if (out["file"])        cfg_.output.file_path   = out["file"].as<std::string>();
+      if (out["osd_file"])   cfg_.output.osd_file    = out["osd_file"].as<std::string>();
+      if (out["osd_display"]) cfg_.output.osd_display = out["osd_display"].as<bool>(false);
     }
 
     return true;
