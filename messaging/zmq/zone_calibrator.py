@@ -97,9 +97,9 @@ def _draw_state(
 
     # HUD
     lines = [
-        "Left-click: add vertex   Right-click: close polygon",
-        "n: name zone   z: undo vertex   s: save   q: quit",
-        f"Zone {zone_idx + 1} in progress — {len(current_poly)} vertices",
+        "Left-click: add vertex | Right-click: close polygon",
+        "n: name zone | z: undo vertex | s: save | q: quit",
+        f"Zone {zone_idx + 1} in progress ({len(current_poly)} vertices)",
     ]
     for li, text in enumerate(lines):
         cv2.putText(img, text, (10, h - 10 - (len(lines) - 1 - li) * 22),
@@ -135,8 +135,14 @@ class Calibrator:
                 self._dirty = True
 
     def run(self) -> Optional[List[dict]]:
-        win = "Zone Calibrator — press 's' to save, 'q' to quit"
+        win = "Zone Calibrator"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        # Verify the window was actually created (fails silently on headless displays)
+        if cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 0:
+            print("ERROR: OpenCV could not open a display window.", file=sys.stderr)
+            print("  Check that DISPLAY is set and a GUI session is active.", file=sys.stderr)
+            print("  Alternatively, save a frame with ffplay and use --image instead.", file=sys.stderr)
+            return None
         cv2.setMouseCallback(win, self.mouse_callback)
 
         while True:
@@ -222,7 +228,7 @@ def print_yaml(source_id: int, zones: List[dict]) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-def grab_rtsp_frame(url: str) -> np.ndarray:
+def grab_rtsp_frame(url: str, save_path: Optional[str] = None) -> np.ndarray:
     print(f"Connecting to {url} ...", file=sys.stderr)
     cap = cv2.VideoCapture(url)
     if not cap.isOpened():
@@ -235,6 +241,9 @@ def grab_rtsp_frame(url: str) -> np.ndarray:
     if not ok:
         print("Failed to grab frame from RTSP stream.", file=sys.stderr)
         sys.exit(1)
+    if save_path:
+        cv2.imwrite(save_path, frame)
+        print(f"Frame saved to {save_path}", file=sys.stderr)
     return frame
 
 
@@ -243,8 +252,9 @@ def main():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--image", help="Path to a camera screenshot (JPEG/PNG)")
     src.add_argument("--rtsp",  help="RTSP URL to grab one frame from")
-    p.add_argument("--source-id", type=int, required=True, help="Camera source_id (0-based)")
-    p.add_argument("--dwell",     type=float, default=30.0, help="Default dwell threshold (seconds)")
+    p.add_argument("--source-id",  type=int,   required=True,        help="Camera source_id (0-based)")
+    p.add_argument("--dwell",      type=float, default=30.0,         help="Default dwell threshold (seconds)")
+    p.add_argument("--save-frame", metavar="PATH", default=None,     help="Save grabbed RTSP frame to this path and exit (no GUI)")
     args = p.parse_args()
 
     if args.image:
@@ -253,7 +263,10 @@ def main():
             print(f"Cannot read image: {args.image}", file=sys.stderr)
             sys.exit(1)
     else:
-        frame = grab_rtsp_frame(args.rtsp)
+        frame = grab_rtsp_frame(args.rtsp, save_path=args.save_frame)
+        if args.save_frame:
+            print(f"Re-run with:  python3 zone_calibrator.py --image {args.save_frame} --source-id {args.source_id}")
+            sys.exit(0)
 
     print(f"Frame size: {frame.shape[1]}x{frame.shape[0]}", file=sys.stderr)
     print("Define zones by clicking vertices. Right-click to close a polygon.", file=sys.stderr)
