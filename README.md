@@ -24,12 +24,11 @@ This project highlights how a standardized pipeline approach (e.g., DeepStream) 
 
 - Multi-stream video ingestion (RTSP / camera inputs)
 - GPU-accelerated decode and inference (DeepStream pipeline)
-- Object detection (YOLO-based)
+- Object detection using NVIDIA PeopleNet or custom YOLO-based models
 - Multi-object tracking
 - Re-identification (Re-ID)
 - Event detection (e.g., loitering)
-- Scalable pipeline design for 10–40+ camera scenarios
-- 
+- Multi-stream scalability (supports varying camera counts based on hardware capacity and deployment constraints)
 ---
 
 ## Architecture
@@ -93,7 +92,7 @@ Target hardware: **NVIDIA Jetson Orin NX** — JetPack 5.x (L4T R35), CUDA 11.4,
 | 1 | C++ DeepStream pipeline — detection, tracking, JSONL output | **Done** |
 | 2 | ZeroMQ / Kafka messaging | **Done** |
 | 3 | ReID embedding extraction + cross-camera correlation | **Done** |
-| 4 | Loitering detection engine (zones, dwell-time thresholds) | Planned |
+| 4 | Loitering detection engine (zones, dwell-time thresholds) | **Done** |
 | 5 | FastAPI control plane | Planned |
 | 6 | Production hardening — Docker, metrics, storage, UI | Planned |
 
