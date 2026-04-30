@@ -24,12 +24,11 @@ This project highlights how a standardized pipeline approach (e.g., DeepStream) 
 
 - Multi-stream video ingestion (RTSP / camera inputs)
 - GPU-accelerated decode and inference (DeepStream pipeline)
-- Object detection (PeopleNet ResNet-34, TensorRT)
+- Object detection using NVIDIA PeopleNet or custom YOLO-based models
 - Multi-object tracking
 - Re-identification (Re-ID)
 - Event detection (e.g., loitering)
-- Scalable pipeline design for 10–40+ camera scenarios
-- 
+- Multi-stream scalability (supports varying camera counts based on hardware capacity and deployment constraints)
 ---
 
 ## Architecture
