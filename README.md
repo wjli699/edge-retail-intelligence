@@ -1,7 +1,35 @@
 # Edge Video Intelligence Pipeline (DeepStream-based, multi-stream, reusable across industries)
 
-A GPU-accelerated, multi-camera video analytics pipeline designed to demonstrate scalable edge AI deployment patterns across industries: person detection, per-camera tracking, cross-camera re-identification (ReID), and loitering detection — running on **NVIDIA Jetson Orin NX**.
+This project demonstrates a GPU-accelerated, multi-camera video analytics pipeline built on NVIDIA DeepStream.
 
+It is designed to reflect real-world edge AI deployment patterns, including multi-stream scaling, tracking, re-identification, and event detection.
+
+The architecture is reusable across retail, industrial, and public sector use cases, with a focus on reducing integration complexity and accelerating POC-to-production workflows.
+
+---
+
+## Why This Matters
+
+In many edge AI deployments, teams spend significant time rebuilding video pipelines before delivering business value.
+
+This project highlights how a standardized pipeline approach (e.g., DeepStream) can:
+- Reduce integration complexity
+- Improve multi-stream scalability
+- Accelerate time from POC to production
+- Allow teams to focus on application logic instead of infrastructure
+
+---
+
+## Key Capabilities
+
+- Multi-stream video ingestion (RTSP / camera inputs)
+- GPU-accelerated decode and inference (DeepStream pipeline)
+- Object detection (YOLO-based)
+- Multi-object tracking
+- Re-identification (Re-ID)
+- Event detection (e.g., loitering)
+- Scalable pipeline design for 10–40+ camera scenarios
+- 
 ---
 
 ## Architecture
@@ -22,6 +50,23 @@ Application Layer  (Phase 5 — FastAPI)
   • Loitering detection (dwell-time + zone rules)
   • REST API
 ```
+
+---
+
+## Key Learnings
+
+- Balancing decode, inference, and memory bandwidth is critical for multi-stream scaling
+- Standardized pipelines significantly reduce development and debugging time
+- Early architectural decisions (pipeline vs custom) impact long-term scalability
+- Many teams underestimate system-level bottlenecks vs model performance
+
+---
+
+## Potential Extensions
+
+- Integration with LLM/VLM for semantic video search
+- Deployment on Jetson / IGX platforms
+- Fleet-scale deployment and monitoring
 
 ---
 
