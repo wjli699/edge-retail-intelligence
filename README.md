@@ -24,7 +24,7 @@ This project highlights how a standardized pipeline approach (e.g., DeepStream) 
 
 - Multi-stream video ingestion (RTSP / camera inputs)
 - GPU-accelerated decode and inference (DeepStream pipeline)
-- Object detection (YOLO-based)
+- Object detection (PeopleNet ResNet-34, TensorRT)
 - Multi-object tracking
 - Re-identification (Re-ID)
 - Event detection (e.g., loitering)
@@ -93,8 +93,8 @@ Target hardware: **NVIDIA Jetson Orin NX** — JetPack 5.x (L4T R35), CUDA 11.4,
 | 1 | C++ DeepStream pipeline — detection, tracking, JSONL output | **Done** |
 | 2 | ZeroMQ / Kafka messaging | **Done** |
 | 3 | ReID embedding extraction + cross-camera correlation | **Done** |
-| 4 | Loitering detection engine (zones, dwell-time thresholds) | Planned |
-| 5 | FastAPI control plane | Planned |
+| 4 | Loitering detection engine (zones, dwell-time thresholds) | **Done** |
+| 5 | FastAPI control plane (camera management, event query, rules) | Planned |
 | 6 | Production hardening — Docker, metrics, storage, UI | Planned |
 
 ---
@@ -172,6 +172,46 @@ The OSD draws color-coded bounding boxes keyed by **global ID** (same color = sa
 # Playback recorded file (use ffplay — VLC 3.0.x crashes on Jetson ARM64):
 ffplay /tmp/reid_annotated.mkv
 ```
+
+---
+
+## Phase 4 — Loitering Detection
+
+### Setup zones (one-time per camera)
+
+```bash
+cd messaging/zmq
+pip3 install -r requirements.txt
+
+# Click polygon vertices on a camera screenshot, prints zones.yaml snippet:
+python3 zone_calibrator.py --image /tmp/frame.png --source-id 0 --dwell 30
+
+# Or grab a frame directly from live RTSP:
+python3 zone_calibrator.py --rtsp rtsp://192.168.9.146:18554/stream1 --source-id 0
+```
+
+Edit `messaging/zmq/zones.yaml` with the output. Coordinates are in the original camera frame space (default 1920×1080).
+
+### Run the loitering detector
+
+```bash
+# Terminal 1 — inference pipeline (same as always)
+cd core_engine && ./build/edge_retail_core_engine --config configs/default.yaml --verbose
+
+# Terminal 2 — loitering detector
+cd messaging/zmq
+python3 loitering_detector.py --zones zones.yaml --endpoint tcp://localhost:5555
+```
+
+Loitering alerts are printed to stdout as JSON. Active dweller status is printed to stderr every 30 seconds:
+```json
+{"event":"loitering_alert","ts_ms":1713000000000,"source_id":0,"tid":7,
+ "zone":"entrance","dwell_s":47.2,"bbox":{"l":312.0,"t":88.0,"w":96.0,"h":260.0}}
+```
+
+Key flags: `--alert-cooldown 60` (seconds between repeat alerts for same person+zone), `--stale-ttl 5` (seconds before a dropped track's zone state is evicted), `--status-interval 30`.
+
+**No ReID required** — works entirely on per-camera `tid`. The loitering detector runs independently of `reid_matcher.py` and functions even with the SGIE disabled.
 
 ---
 

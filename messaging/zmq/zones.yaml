@@ -1,0 +1,39 @@
+# Zone configuration for loitering detection (Phase 4).
+#
+# Coordinates are in the original camera frame space (default 1920x1080).
+# Use zone_calibrator.py to pick polygon vertices interactively from a
+# camera screenshot or RTSP frame.
+#
+# dwell_threshold_s: seconds a person must remain inside the zone before
+#                    a loitering_alert event is emitted.
+#
+# Each source_id corresponds to the camera index in default.yaml (0-based).
+
+cameras:
+  - source_id: 0
+    zones:
+      - name: "entrance"
+        dwell_threshold_s: 30
+        polygon:
+          - [160,  200]
+          - [760,  200]
+          - [760,  900]
+          - [160,  900]
+
+      - name: "shelf-A"
+        dwell_threshold_s: 60
+        polygon:
+          - [850,  150]
+          - [1550, 150]
+          - [1550, 850]
+          - [850,  850]
+
+  - source_id: 1
+    zones:
+      - name: "checkout"
+        dwell_threshold_s: 45
+        polygon:
+          - [300,  100]
+          - [1600, 100]
+          - [1600, 950]
+          - [300,  950]

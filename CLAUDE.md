@@ -83,7 +83,7 @@ For local debugging without ZMQ, switch `output.mode: stdout` in `configs/defaul
 | 1 | C++ DeepStream pipeline — PeopleNet detection, NvDCF tracking, pad_probe JSON output | **complete** |
 | 2 | ZeroMQ PUB/SUB messaging — C++ publisher + Python consumer | **complete** |
 | 3 | ReID + multi-camera correlation | **complete** |
-| 4 | Loitering detection engine (zones, dwell time) | not started |
+| 4 | Loitering detection engine (zones, dwell time) | **complete** |
 | 5 | FastAPI control plane | not started |
 | 6 | Production readiness (Docker, logging, metrics) | not started |
 
