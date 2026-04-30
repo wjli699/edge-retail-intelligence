@@ -1,6 +1,6 @@
-# Edge Retail Intelligence Engine
+# Edge Video Intelligence Pipeline (DeepStream-based, multi-stream, reusable across industries)
 
-Real-time edge AI for retail analytics: person detection, per-camera tracking, cross-camera re-identification (ReID), and loitering detection — running on **NVIDIA Jetson Orin NX**.
+A GPU-accelerated, multi-camera video analytics pipeline designed to demonstrate scalable edge AI deployment patterns across industries: person detection, per-camera tracking, cross-camera re-identification (ReID), and loitering detection — running on **NVIDIA Jetson Orin NX**.
 
 ---
 
